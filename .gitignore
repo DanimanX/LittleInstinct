@@ -1,0 +1,23 @@
+# Quartus build products
+build/
+db/
+incremental_db/
+output_files/
+*.rpt
+*.summary
+*.smsg
+*.pin
+*.qws
+*.sof
+*.rbf
+*.jdi
+
+# reference checkouts, fetched by tools/fetch_references.sh
+references/
+
+# user-supplied game data: copyrighted Midway/Rare content, never committed.
+# Everything under roms/ is ignored except the README that explains the folder.
+roms/*
+!roms/README.md
+*.7z
+src/fpga/c5_pin_model_dump.txt

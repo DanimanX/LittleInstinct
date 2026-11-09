@@ -1,0 +1,2 @@
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/dcs/dcs_mem.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/dcs/adsp2105.sv

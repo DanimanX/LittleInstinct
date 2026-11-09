@@ -1,0 +1,38 @@
+{
+    "data": {
+        "magic": "APF_VER_1",
+        "data_slots": [
+            {
+                "name": "Arcade Game",
+                "id": 0,
+                "required": true,
+                "parameters": "0x113",
+                "extensions": [
+                    "json"
+                ]
+            },
+            {
+                "name": "ROM",
+                "id": 1,
+                "required": true,
+                "parameters": "0x10A",
+                "extensions": [
+                    "rom"
+                ],
+                "size_exact": 4718592,
+                "address": "0x00000000"
+            },
+            {
+                "name": "Disk image",
+                "id": 2,
+                "required": true,
+                "parameters": "0x0",
+                "deferload": true,
+                "secondary": true,
+                "extensions": [
+                    "img"
+                ]
+            }
+        ]
+    }
+}

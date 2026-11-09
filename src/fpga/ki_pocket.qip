@@ -1,0 +1,48 @@
+# Killer Instinct Pocket build: source list.
+#
+# rtl is a symlink to the vendored upstream RTL (upstream/Arcade-KillerInstinct_MiSTer/rtl),
+# so the core is compiled by reference and never edited in this tree. Upstream's
+# own files.qip is the authority for what belongs in the core; this list is that
+# file minus KillerInstinct.sv (the MiSTer board shell, replaced by
+# pocket_rtl/ki_pocket_top.sv) and minus rtl/pll.qip (MiSTer's 50 MHz-reference
+# PLL, replaced by pocket_rtl/ki_pll.sv, whose reference is the Pocket's 74.25 MHz).
+#
+# The CPU, DCS and ATA files are listed from milestone 1 so the file set is
+# complete; Quartus only elaborates what is instantiated, so listing them costs
+# nothing until they are wired up.
+
+# ---- core RTL (CPU, DCS, and the KI board logic)
+set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/cpu/mem.qip ]
+set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/cpu/cpu.qip ]
+set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/dcs/dcs.qip ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/ki_cpu_core.vhd ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_board_pkg.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_board_io.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_ata.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_dcs_audio.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fast_fill.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fb_ram.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_framebuffer.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_memory_bridge.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_adapter.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_bist.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_burst.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_x2.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_video_timing.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_pause.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_keyboard.sv ]
+# MiSTer-shell-only debug overlays: they draw into the MiSTer OSD/status, not the
+# core's own video, and cost BRAM. Left out of the Pocket build.
+# set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fps_overlay.sv ]
+# set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_debug_screen.sv ]
+# set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_startup_osd_button.sv ]
+
+# ---- Pocket top (new code, this port)
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_pll.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_pocket_top.sv ]
+
+# ---- APF core top (core/): template parts, as every openFPGA core uses them
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) core/core_top.v ]
+set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) core/core_bridge_cmd.v ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) core/sound_i2s.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) core/sync_fifo.sv ]

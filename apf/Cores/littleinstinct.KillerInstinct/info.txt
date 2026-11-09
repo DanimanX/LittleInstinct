@@ -1,0 +1,30 @@
+Killer Instinct / Killer Instinct 2 for the Analogue Pocket.
+
+Port of the MiSTer core Arcade-KillerInstinct_MiSTer (Midway KI hardware:
+R4600 MIPS III + DCS audio + ATA hard disk).
+
+STATUS: BRING-UP MILESTONE 1. This does not play the games.
+
+What works, verified in Quartus 25.1 for the Pocket's 5CEBA4F23C8:
+  - the Quartus project builds and fits (456 ALMs, 224/224 pins), producing
+    pocket_ki.rbf
+  - PLL: 74.25 MHz reference -> 50 MHz core, 100 MHz memory, 6.25 MHz pixel
+  - APF framework (apf_top, bridge, pad controller) and the command handler
+  - the core's own video timing and framebuffer RTL is instantiated
+
+What does not work yet:
+  - the picture. The framebuffer's line RAMs are optimised away by the fitter,
+    so video output should be assumed blank. See docs/FEASIBILITY.md section 6.
+  - the R4600, DCS audio, ATA disk and the memory bridge are not wired up
+
+The measured blocker for the full core is block RAM, not game memory: the
+framebuffer alone is 2.46 Mbit of the Pocket's 3.15 Mbit, and the upstream core
+needs 113% of the device as it stands. docs/FEASIBILITY.md has the numbers.
+
+Needs, on the SD card (once a working bitstream exists):
+  Assets/killerinstinct/common/kinst.rom    (built with tools/build_rom.py)
+  Assets/killerinstinct/common/kinst.img    (chdman extracthd from kinst.chd)
+  same for kinst2.
+
+ROMs and disk images are NOT included: they are copyrighted Midway/Rare
+content. Build the .rom from your own kinst.zip / kinst2.zip dumps.
