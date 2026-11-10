@@ -48,6 +48,7 @@ module pk_io #(
 	input  wire [15:0] dataslot_update_id,
 	input  wire [31:0] dataslot_update_size,
 	output reg         target_dataslot_read = 1'b0,
+	output reg         target_dataslot_write = 1'b0,
 	input  wire        target_dataslot_ack,
 	input  wire        target_dataslot_done,
 	input  wire  [2:0] target_dataslot_err,
@@ -55,6 +56,7 @@ module pk_io #(
 	output reg  [31:0] target_dataslot_slotoffset = 32'd0,
 	output wire [31:0] target_dataslot_bridgeaddr,
 	output reg  [31:0] target_dataslot_length = 32'd0,
+	output reg  [31:0] disk_bridge_rd_data = 32'd0,
 
 	// ---- pad / settings, from the APF pad controller -----------------------
 	input  wire [31:0] pad_key,          // APF key bitmap, same layout as MiSTer
@@ -114,11 +116,11 @@ module pk_io #(
 
 	dcfifo #(
 		.intended_device_family("Cyclone V"),
-		.lpm_numwords(1024),
+		.lpm_numwords(8192),
 		.lpm_showahead("OFF"),
 		.lpm_type("dcfifo"),
 		.lpm_width(44),
-		.lpm_widthu(10),
+		.lpm_widthu(13),
 		.overflow_checking("ON"),
 		.underflow_checking("OFF"),
 		.use_eab("ON"),
@@ -131,15 +133,35 @@ module pk_io #(
 		.aclr(~apf_reset_n), .eccstatus(), .rdfull(), .rdusedw(), .wrempty(), .wrusedw()
 	);
 
+	// 512-byte sector write buffer (128 x 32-bit words) for ATA sector writes (0x0184)
+	(* ramstyle = "M10K, no_rw_check" *)
+	reg [31:0] wr_buf [0:127];
+	always @(posedge clk_74a) begin
+		disk_bridge_rd_data <= wr_buf[bridge_addr[8:2]];
+	end
+
 	// ---------------------------------------------------------------- clk domain
 	// Emit, in order: game selector (index 0x0000, 1 word), DIPs (0x00FE, 1
 	// word), then the image (index 0x0001) as it arrives. Once in S_DONE, the
 	// same FIFO drains APF deferred data slot reads for the ATA hard disk.
-	localparam [2:0] S_SEL = 3'd0, S_DIP = 3'd1, S_WAIT = 3'd2,
-	                 S_LO = 3'd3, S_HI = 3'd4, S_DONE = 3'd5,
-	                 S_DISK_LO = 3'd6, S_DISK_HI = 3'd7;
+	// Note: dcfifo has lpm_showahead("OFF") and fifo_rd is registered, so
+	// S_RD and S_DISK_RD wait 1 clk cycle after asserting fifo_rd before
+	// latching fifo_dout in S_LO / S_DISK_LO.
+	localparam [3:0] S_SEL      = 4'd0,
+	                 S_DIP      = 4'd1,
+	                 S_WAIT     = 4'd2,
+	                 S_RD       = 4'd3,
+	                 S_LO       = 4'd4,
+	                 S_HI       = 4'd5,
+	                 S_DONE     = 4'd6,
+	                 S_DISK_RD  = 4'd7,
+	                 S_DISK_LO  = 4'd8,
+	                 S_DISK_HI  = 4'd9,
+	                 S_WR_WAIT0 = 4'd10,
+	                 S_WR_LO    = 4'd11,
+	                 S_WR_HI    = 4'd12;
 
-	reg [2:0]  st = S_SEL;
+	reg [3:0]  st = S_SEL;
 	reg [43:0] held = 44'd0;
 	reg [26:0] wr_addr = 27'd0;      // ioctl_addr for the image, in bytes
 
@@ -155,28 +177,33 @@ module pk_io #(
 
 	reg [2:0]  upd_sync = 3'd0;
 	reg        disk_req_tog = 1'b0;
+	reg        disk_is_write = 1'b0;
 	reg [2:0]  disk_done_sync = 3'd0;
 	reg [12:0] disk_words_rem = 13'd0;
 	reg        disk_active = 1'b0;
 
 	assign target_dataslot_id         = DISK_SLOT_ID;
 	assign target_dataslot_bridgeaddr = DISK_BRIDGE_BASE;
-	assign img_readonly               = 1'b1;
+	assign img_readonly               = 1'b0;
 
-	// clk_74a side of Target Command (0x0180: Data slot read)
+	// clk_74a side of Target Command (0x0180: Data slot read, 0x0184: Data slot write)
 	reg [2:0] req_sync_74a = 3'd0;
+	reg [1:0] wr_sync_74a  = 2'd0;
 	reg       done_tog_74a = 1'b0;
 	reg [1:0] tcmd_st = 2'd0;
 	always @(posedge clk_74a) begin
 		req_sync_74a <= {req_sync_74a[1:0], disk_req_tog};
+		wr_sync_74a  <= {wr_sync_74a[0], disk_is_write};
 		case (tcmd_st)
 		2'd0: if (req_sync_74a[2] != done_tog_74a) begin
-			target_dataslot_read <= 1'b1;
-			tcmd_st              <= 2'd1;
+			target_dataslot_read  <= ~wr_sync_74a[1];
+			target_dataslot_write <=  wr_sync_74a[1];
+			tcmd_st               <= 2'd1;
 		end
 		2'd1: if (target_dataslot_ack || !target_dataslot_done) begin
-			target_dataslot_read <= 1'b0;
-			tcmd_st              <= 2'd2;
+			target_dataslot_read  <= 1'b0;
+			target_dataslot_write <= 1'b0;
+			tcmd_st               <= 2'd2;
 		end
 		2'd2: if (target_dataslot_done) begin
 			done_tog_74a <= req_sync_74a[2];
@@ -210,6 +237,7 @@ module pk_io #(
 			status         <= 128'd0;
 			sd_ack         <= 1'b0;
 			disk_active    <= 1'b0;
+			disk_is_write  <= 1'b0;
 		end else begin
 			status <= 128'd0;
 
@@ -220,12 +248,18 @@ module pk_io #(
 				disk_words_rem             <= ({7'd0, sd_blk_cnt} + 13'd1) << 8;
 				sd_ack                     <= 1'b1;
 				disk_active                <= 1'b1;
+				disk_is_write              <= 1'b0;
 				disk_req_tog               <= ~disk_req_tog;
 			end else if (st == S_DONE && !disk_active && sd_wr) begin
-				// Read-only image fallback: acknowledge immediately
-				sd_ack      <= 1'b1;
-				disk_active <= 1'b1;
-				disk_words_rem <= 13'd0;
+				// Copy 512-byte sector from ki_ata's sector_buffer and write via APF 0x0184
+				target_dataslot_slotoffset <= {sd_lba[22:0], 9'd0};
+				target_dataslot_length     <= 32'd512;
+				disk_words_rem             <= 13'd0;
+				sd_ack                     <= 1'b1;
+				disk_active                <= 1'b1;
+				disk_is_write              <= 1'b1;
+				sd_buff_addr               <= 13'd0;
+				st                         <= S_WR_WAIT0;
 			end
 
 			case (st)
@@ -242,7 +276,7 @@ module pk_io #(
 			end
 			S_DIP: begin
 				ioctl_index <= 16'h00FE;
-				ioctl_addr  <= 27'd2;
+				ioctl_addr  <= 27'd0;
 				ioctl_dout  <= dip_switches_i;
 				ioctl_wr    <= 1'b1;
 				st          <= S_WAIT;
@@ -250,12 +284,16 @@ module pk_io #(
 			S_WAIT: begin
 				ioctl_index <= 16'h0001;
 				if (!fifo_empty && !ioctl_wait) begin
-					fifo_rd <= 1'b1;      // q valid next cycle
-					st      <= S_LO;
+					fifo_rd <= 1'b1;
+					st      <= S_RD;
 				end
 			end
+			S_RD: begin
+				ioctl_index <= 16'h0001;
+				st          <= S_LO;
+			end
 			S_LO: begin
-				held     <= fifo_dout;
+				held       <= fifo_dout;
 				ioctl_addr <= wr_addr;
 				ioctl_dout <= fifo_dout[15:0];
 				ioctl_wr   <= 1'b1;
@@ -277,12 +315,15 @@ module pk_io #(
 				ioctl_download <= 1'b0;
 				if (!fifo_empty) begin
 					fifo_rd <= 1'b1;
-					st      <= S_DISK_LO;
+					st      <= S_DISK_RD;
 				end else if (disk_active && (disk_words_rem == 13'd0) &&
 				             (disk_done_sync[2] == disk_req_tog)) begin
 					sd_ack      <= 1'b0;
 					disk_active <= 1'b0;
 				end
+			end
+			S_DISK_RD: begin
+				st <= S_DISK_LO;
 			end
 			S_DISK_LO: begin
 				held         <= fifo_dout;
@@ -300,6 +341,24 @@ module pk_io #(
 				if (held[43] && (disk_words_rem != 13'd0))
 					disk_words_rem <= disk_words_rem - 13'd1;
 				st           <= S_DONE;
+			end
+			S_WR_WAIT0: begin
+				sd_buff_addr <= sd_buff_addr + 13'd1;
+				st           <= S_WR_LO;
+			end
+			S_WR_LO: begin
+				held[15:0] <= sd_buff_din;
+				st         <= S_WR_HI;
+			end
+			S_WR_HI: begin
+				wr_buf[sd_buff_addr[7:1]] <= {sd_buff_din, held[15:0]};
+				if (sd_buff_addr[7:0] == 8'hFF) begin
+					disk_req_tog <= ~disk_req_tog;
+					st           <= S_DONE;
+				end else begin
+					sd_buff_addr <= sd_buff_addr + 13'd1;
+					st           <= S_WR_WAIT0;
+				end
 			end
 			default: st <= S_SEL;
 			endcase

@@ -323,6 +323,7 @@ assign vpll_feed = 1'bZ;
 assign aux_scl   = 1'bZ;
 
     wire    [31:0]  cmd_bridge_rd_data;
+    wire    [31:0]  disk_bridge_rd_data;
 
 // for bridge write data, we just broadcast it to all bus devices
 // for bridge read data, we have to mux it
@@ -330,6 +331,9 @@ always @(*) begin
     casex(bridge_addr)
     default: begin
         bridge_rd_data <= 0;
+    end
+    32'h4000xxxx: begin
+        bridge_rd_data <= disk_bridge_rd_data;
     end
     32'hF8xxxxxx: begin
         bridge_rd_data <= cmd_bridge_rd_data;
@@ -394,7 +398,7 @@ end
 // synchronous to clk_74a
 // Driven by ki_pocket_top -> pk_io for deferred disk-image sector reads (ATA).
     wire            target_dataslot_read;
-    wire            target_dataslot_write = 1'b0;
+    wire            target_dataslot_write;
     wire            target_dataslot_getfile = 1'b0;
     wire            target_dataslot_openfile = 1'b0;
 
@@ -514,6 +518,7 @@ ki_pocket_top iki (
     .dataslot_update_id         ( dataslot_update_id ),
     .dataslot_update_size       ( dataslot_update_size ),
     .target_dataslot_read       ( target_dataslot_read ),
+    .target_dataslot_write      ( target_dataslot_write ),
     .target_dataslot_ack        ( target_dataslot_ack ),
     .target_dataslot_done       ( target_dataslot_done ),
     .target_dataslot_err        ( target_dataslot_err ),
@@ -521,6 +526,7 @@ ki_pocket_top iki (
     .target_dataslot_slotoffset ( target_dataslot_slotoffset ),
     .target_dataslot_bridgeaddr ( target_dataslot_bridgeaddr ),
     .target_dataslot_length     ( target_dataslot_length ),
+    .disk_bridge_rd_data        ( disk_bridge_rd_data ),
 
     .pad_key                    ( cont1_key ),
 

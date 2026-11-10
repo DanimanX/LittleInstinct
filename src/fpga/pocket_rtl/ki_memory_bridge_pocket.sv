@@ -998,27 +998,29 @@ module ki_memory_bridge #(
               download_inflight <= 1'b1;
               state <= DOWNLOAD_SDRAM_WRITE_ISSUE;
             end
-          end else if (video_request && !video_done && !vid_inflight) begin
+          end else if (!ioctl_download && video_request && !video_done && !vid_inflight) begin
             vid_inflight <= 1'b1;
             state <= VID_ISSUE;
-          end else if (dcs_rom_request && !dcs_rom_ready && !dcs_rom_inflight && !dcs_rom_request_seen_level) begin
+          end else if (!ioctl_download && dcs_rom_request && !dcs_rom_ready && !dcs_rom_inflight && !dcs_rom_request_seen_level) begin
             dcs_rom_req_addr <= dcs_rom_address;
             dcs_rom_inflight <= 1'b1;
             dcs_rom_request_seen_level <= 1'b1;
             state <= DCS_ROM_READ_ISSUE;
           end else if (fb_line_req) begin
-            // Acknowledged here, as the SDRAM line path above is, and safe for
-            // the same reason: the state machine is serial, so no CPU read of
-            // this line can be served before FB_LINE_WRITE has finished.
-            fb_line_data    <= active_line_data;
-            fb_line_base    <= active_word_address;
-            fb_line_qmask   <= active_write_mask[3:0];
-            fb_line_bytes   <= active_line_bytes;
-            fb_line_k       <= 2'd0;
+            // Route framebuffer dirty-line writebacks through the same split-aware
+            // SDRAM writeback path as ordinary RAM lines so partial-qword masks
+            // (active_write_mask[3:0] != 4'b1111) never overwrite unstored qwords.
+            wb_addr         <= active_word_address;
+            wb_data         <= active_line_data;
+            wb_be           <= {32{1'b1}};
+            wb_split        <= (active_write_mask[3:0] != 4'b1111);
+            wb_qmask        <= active_write_mask[3:0];
+            wb_count        <= 3'd4;
+            wb_idle         <= 6'd0;
             fb_write_accept <= 1'b1;
             cpu_pending     <= 1'b0;
             cpu_done        <= 1'b1;
-            state           <= FB_LINE_WRITE;
+            state           <= SDRAM_WB_FLUSH_ISSUE;
             debug_write_count     <= debug_write_count + 32'd4;
             debug_low_write_count <= debug_low_write_count + 32'd4;
           end else if (line_req) begin
@@ -1579,12 +1581,10 @@ module ki_memory_bridge #(
   assign ddram_be       = 8'd0;
   assign ddram_we       = 1'b0;
 
-  // Direct fast fill safe condition
-  assign fast_ok = !reset && (state == IDLE) &&
-                   !cpu_pending &&
-                   (wb_count == 3'd0) && !done_owed && !fill_tail &&
-                   (download_count == 5'd0) && !cpu_hold &&
-                   !video_request && !dcs_rom_request;
+  // Disable direct fast fill bypass on Pocket: VID_ISSUE and DCS_ROM_READ_ISSUE
+  // share ki_sdram_burst through this bridge, so all CPU SDRAM requests must be
+  // serialized through IDLE rather than bypassing the bridge via fast_tog.
+  assign fast_ok = 1'b0;
 
 `ifndef SYNTHESIS
   // fast_ok holds through FB_LINE_WRITE on this.

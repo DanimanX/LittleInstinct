@@ -21,6 +21,7 @@ module emu
 	input  [15:0] dataslot_update_id,
 	input  [31:0] dataslot_update_size,
 	output        target_dataslot_read,
+	output        target_dataslot_write,
 	input         target_dataslot_ack,
 	input         target_dataslot_done,
 	input   [2:0] target_dataslot_err,
@@ -28,6 +29,7 @@ module emu
 	output [31:0] target_dataslot_slotoffset,
 	output [31:0] target_dataslot_bridgeaddr,
 	output [31:0] target_dataslot_length,
+	output [31:0] disk_bridge_rd_data,
 	input  [31:0] pad_key,
 	output        loader_overflow,
 	inout  [45:0] HPS_BUS,
@@ -260,6 +262,7 @@ pk_io #(.ROM_BYTES(4718592)) pk_io
 	.dataslot_update_id         (dataslot_update_id),
 	.dataslot_update_size       (dataslot_update_size),
 	.target_dataslot_read       (target_dataslot_read),
+	.target_dataslot_write      (target_dataslot_write),
 	.target_dataslot_ack        (target_dataslot_ack),
 	.target_dataslot_done       (target_dataslot_done),
 	.target_dataslot_err        (target_dataslot_err),
@@ -267,6 +270,7 @@ pk_io #(.ROM_BYTES(4718592)) pk_io
 	.target_dataslot_slotoffset (target_dataslot_slotoffset),
 	.target_dataslot_bridgeaddr (target_dataslot_bridgeaddr),
 	.target_dataslot_length     (target_dataslot_length),
+	.disk_bridge_rd_data        (disk_bridge_rd_data),
 	.pad_key                    (pad_key),
 	.game_select                (16'h0000),      // KI1; KI2 sets bit 0 via interact.json later
 	.dip_switches_i             (16'hffff),
@@ -1090,7 +1094,14 @@ wire        controller_fast_tog;
 wire [24:0] controller_fast_addr;
 wire        controller_fast_valid;
 
-ki_cpu_core #(.DEBUG_TRACE(DEBUG_TRACE)) cpu
+ki_cpu_core #(
+	.DEBUG_TRACE(DEBUG_TRACE),
+	.DCACHE_FB_PARTIAL(0),
+	.DCACHE_CWF_FB(0),
+	.DCACHE_FILL_FIRST(0),
+	.DCACHE_FILL_AT_MISS(0),
+	.DIRECT_FILL(0)
+) cpu
 (
 	.clk1x(clk_core),
 	.clk93(clk_cpu),

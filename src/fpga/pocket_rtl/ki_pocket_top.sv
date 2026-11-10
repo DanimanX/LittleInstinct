@@ -37,6 +37,7 @@ module ki_pocket_top (
 	input  wire [15:0] dataslot_update_id,
 	input  wire [31:0] dataslot_update_size,
 	output wire        target_dataslot_read,
+	output wire        target_dataslot_write,
 	input  wire        target_dataslot_ack,
 	input  wire        target_dataslot_done,
 	input  wire  [2:0] target_dataslot_err,
@@ -44,6 +45,7 @@ module ki_pocket_top (
 	output wire [31:0] target_dataslot_slotoffset,
 	output wire [31:0] target_dataslot_bridgeaddr,
 	output wire [31:0] target_dataslot_length,
+	output wire [31:0] disk_bridge_rd_data,
 
 	// APF pad
 	input  wire [31:0] pad_key,
@@ -141,6 +143,7 @@ module ki_pocket_top (
 		.dataslot_update_id         (dataslot_update_id),
 		.dataslot_update_size       (dataslot_update_size),
 		.target_dataslot_read       (target_dataslot_read),
+		.target_dataslot_write      (target_dataslot_write),
 		.target_dataslot_ack        (target_dataslot_ack),
 		.target_dataslot_done       (target_dataslot_done),
 		.target_dataslot_err        (target_dataslot_err),
@@ -148,6 +151,7 @@ module ki_pocket_top (
 		.target_dataslot_slotoffset (target_dataslot_slotoffset),
 		.target_dataslot_bridgeaddr (target_dataslot_bridgeaddr),
 		.target_dataslot_length     (target_dataslot_length),
+		.disk_bridge_rd_data        (disk_bridge_rd_data),
 		.pad_key                    (pad_key),
 		.loader_overflow            (loader_overflow),
 
@@ -247,7 +251,7 @@ module ki_pocket_top (
 	reg         v_de  = 1'b0;
 	reg         v_hs  = 1'b0;
 	reg         v_vs  = 1'b0;
-	always @(posedge clk_core) begin
+	always @(posedge CLK_VIDEO) begin
 		if (CE_PIXEL) begin
 			v_rgb <= {VGA_R, VGA_G, VGA_B};
 			v_de  <= VGA_DE;
@@ -272,7 +276,7 @@ module ki_pocket_top (
 		.SIGNED_INPUT  (1)
 	) isound (
 		.clk_74a    (clk_74a),
-		.clk_audio  (clk_core),
+		.clk_audio  (CLK_VIDEO),
 		.audio_l    ($signed(AUDIO_L)),
 		.audio_r    ($signed(AUDIO_R)),
 		.audio_mclk (audio_mclk),
