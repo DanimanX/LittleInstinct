@@ -253,3 +253,66 @@ Upstream RTL is GPL-3.0-or-later (`upstream/.../LICENSE`, notices inside files).
 The Analogue Pocket Framework files this port reuses are distributed with
 openFPGA cores under their own terms. Killer Instinct is a trademark of Rare /
 Nintendo / Midway; this project is not affiliated with any of them.
+
+---
+
+## Depuración y Diagnóstico openFPGA (Analogue Pocket)
+
+Registro de errores de inicialización del framework APF detectados en hardware real y sus soluciones:
+
+### 1. `Load error in 'core'. General error. Error in core setup`
+- **Causa:** 
+  1. El Core ID en openFPGA se calcula estrictamente como `<author>.<shortname>`. En `core.json` figuraba `"author": "DanimanX"` mientras que la carpeta en la MicroSD era `Cores/littleinstinct.KillerInstinct/`. Al discrepar el nombre del directorio esperado (`DanimanX.KillerInstinct`), la Pocket abortaba el setup.
+  2. El Slot 1 de ROM en `data.json` tenía el Bit 1 activo (`0x10A`), forzando la búsqueda en la carpeta específica del core en lugar de `Assets/killerinstinct/common/`.
+  3. Las instancias JSON tenían `"data_path": ""` vacío.
+- **Solución aplicada:**
+  - Ajustado `"author": "littleinstinct"` en `core.json`.
+  - Corregido Slot 1 a `"parameters": "0x108"` en `data.json` (modo archivo común de plataforma + sólo lectura, idéntico al estándar de Jotego).
+  - Configurado `"data_path": "common/"` en las instancias JSON.
+
+### 2. `Load error in 'variants'. General error. Error in core setup`
+- **Causa:** El firmware de la Analogue Pocket exige la existencia de `variants.json` en el directorio del core antes de transferir slots. Al no existir, el bootloader fallaba de inmediato.
+- **Solución aplicada:**
+  - Incorporado [`variants.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/variants.json) con lista de variantes vacía (`"variant_list": []`).
+  - Incorporados descriptores auxiliares estándar APF: [`video.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/video.json) (escalador 320×240 a 4:3 con filtros CRT/LCD), [`audio.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/audio.json) e [`interact.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/interact.json).
+
+### 3. `Error in framework. RS: Host commands ignored` (Deadlock RTL en `boot_done`)
+- **Síntoma:** El bitstream se carga exitosamente en la FPGA, pero durante el handshake con el chip host APF de la Pocket, la consola entra en timeout y aborta con `RS: Host commands ignored`.
+- **Causa raíz en RTL ([`ki_pocket_top.sv`](file:///Users/danimanx/code/LittleInstinct/src/fpga/pocket_rtl/ki_pocket_top.sv)):**
+  - La señal `boot_done` estaba asignada a `core_reset_n`:
+    ```verilog
+    always @(posedge clk_core) rst_sync <= {rst_sync[2:0], (apf_reset_n & pll_locked)};
+    wire core_reset_n = rst_sync[3];
+    assign boot_done  = core_reset_n; // <-- INTERBLOQUEO
+    ```
+  - En `core_top.v`, `status_boot_done = boot_done;` informa al handler APF (`core_bridge_cmd.v`).
+  - Sin embargo, `core_bridge_cmd` mantiene `apf_reset_n` en `0` hasta que la Pocket envía el comando host `0x0011` (`Reset Exit`).
+  - La Pocket envía en bucle el comando `0x0000` (**RS: Request Status**) esperando que `status_boot_done` suba a `1` (indicando que los PLLs y relojes de la FPGA están estables) para poder transferir las ROMs y luego liberar el reset (`0x0011`).
+  - Al esperar `boot_done` a `apf_reset_n`, el core respondía perpetuamente en estado *booting*, provocando que la Pocket agotara el tiempo de espera (timeout) y lanzara `RS: Host commands ignored`.
+- **Solución RTL aplicada:**
+  - `boot_done` sincronizado a `clk_74a` únicamente con `pll_locked`, sin depender de `apf_reset_n`:
+    ```verilog
+    reg [3:0] boot_sync = 4'd0;
+    always @(posedge clk_74a) boot_sync <= {boot_sync[2:0], pll_locked};
+    assign boot_done = boot_sync[3];
+    ```
+  - `core_reset_n` continúa gobernando la lógica interna del R4600 y KI arcade hardware esperando a `apf_reset_n`.
+
+### 4. Instrucciones para recompilar en PC con Linux y Quartus Prime
+
+Para generar el nuevo bitstream con la corrección RTL:
+
+```bash
+# 1. Obtener los últimos cambios
+git pull origin master
+
+# 2. Compilar bitstream completo para Cyclone V 5CEBA4F23C8
+./tools/build_pocket.sh
+
+# 3. Generar el bitstream bit-reversed (bitstream.rbf_r) y el paquete de release
+python3 tools/package_pocket.py
+
+# 4. Copiar el bitstream corregido a la MicroSD:
+cp Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r /media/$USER/*/Cores/littleinstinct.KillerInstinct/
+```
+
