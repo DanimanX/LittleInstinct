@@ -1,7 +1,7 @@
 {
 	"instance": {
 		"magic": "APF_VER_1",
-		"data_path": "",
+		"data_path": "common/",
 		"data_slots": [
 			{
 				"id": 1,
