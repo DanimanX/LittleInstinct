@@ -1,5 +1,9 @@
 # LittleInstinct
 
+<p align="center">
+  <img src="docs/assets/banner.png" alt="LittleInstinct - Killer Instinct openFPGA Core" width="640">
+</p>
+
 Analogue Pocket port of the Killer Instinct arcade core
 ([MiSTer-devel/Arcade-KillerInstinct_MiSTer](https://github.com/MiSTer-devel/Arcade-KillerInstinct_MiSTer)).
 
@@ -227,10 +231,14 @@ tools/check_setup.py roms/
 
 ## On the SD card
 
+A pre-packaged archive ready to extract directly to the microSD card root is provided in [`Release/LittleInstinct_Pocket_v1.0.0.zip`](file:///PROCESOS/LittleInstinct/Release/LittleInstinct_Pocket_v1.0.0.zip):
+
 ```
-Cores/littleinstinct.KillerInstinct/{core,data,input,video,audio,interact}.json
+Cores/littleinstinct.KillerInstinct/{core,data}.json, info.txt
+Cores/littleinstinct.KillerInstinct/icon.bin
 Cores/littleinstinct.KillerInstinct/bitstream.rbf_r
 Platforms/killerinstinct.json
+Platforms/_images/killerinstinct.bin
 Assets/killerinstinct/common/kinst.rom
 Assets/killerinstinct/common/kinst.img
 Assets/killerinstinct/common/kinst2.rom

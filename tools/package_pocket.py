@@ -82,18 +82,25 @@ def main():
         f.write(rbf_r)
     print(f"[+] Wrote: {rbf_r_dest}")
 
-    # Copy metadata JSONs
+    # Copy core metadata and assets (core.json, data.json, info.txt, icon.bin)
     src_core_dir = os.path.join(apf_path, "Cores", core_id)
-    for fname in ["core.json", "data.json", "info.txt"]:
+    for fname in os.listdir(src_core_dir):
         src_f = os.path.join(src_core_dir, fname)
         if os.path.isfile(src_f):
             shutil.copy2(src_f, os.path.join(cores_dir, fname))
             print(f"[+] Copied: Cores/{core_id}/{fname}")
 
-    src_plat = os.path.join(apf_path, "Platforms", "killerinstinct.json")
-    if os.path.isfile(src_plat):
-        shutil.copy2(src_plat, os.path.join(platforms_dir, "killerinstinct.json"))
-        print(f"[+] Copied: Platforms/killerinstinct.json")
+    # Copy platform metadata and banner images (killerinstinct.json, _images/)
+    src_plat_dir = os.path.join(apf_path, "Platforms")
+    for item in os.listdir(src_plat_dir):
+        src_item = os.path.join(src_plat_dir, item)
+        dst_item = os.path.join(platforms_dir, item)
+        if os.path.isdir(src_item):
+            shutil.copytree(src_item, dst_item, dirs_exist_ok=True)
+            print(f"[+] Copied directory: Platforms/{item}")
+        elif os.path.isfile(src_item):
+            shutil.copy2(src_item, dst_item)
+            print(f"[+] Copied: Platforms/{item}")
 
     src_assets = os.path.join(apf_path, "Assets", "killerinstinct", core_id)
     if os.path.isdir(src_assets):
