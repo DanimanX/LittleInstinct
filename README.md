@@ -332,7 +332,18 @@ Registro de errores de inicialización del framework APF detectados en hardware 
   - Direccionamiento corregido en `S_DISK_LO` (`{fifo_dout[42:32], 1'b0}`) y `S_DISK_HI` (`{held[42:32], 1'b1}`) con habilitador `sd_buff_wr <= fifo_dout[43]`.
   - Establecido el tamaño por defecto de `img_size = 64'd131076608` (tamaño exacto de `kinst.img`), garantizando que `image_ready` esté activo desde el ciclo 0 incluso si el host retarda el mensaje `0x008A`.
 
-### 7. Instrucciones para recompilar en PC con Linux y Quartus Prime
+### 7. Pantalla congelada en scanline 0 con barras residuales (`img_reset` interrumpiendo a la CPU)
+- **Síntoma:** Al seleccionar el juego, la pantalla carga y muestra solo la primera línea (scanline 0) en color azul/morado, pero el resto de la pantalla permanece congelada con el patrón de barras horizontales residuales de la SDRAM (`IMG_20261110_155147.jpg`).
+- **Causa raíz en RTL ([`ki_core_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_core_pocket.sv#L329)):**
+  - Al fijar `img_size = 131076608` por defecto, la condición `hdd_image_present = (img_size >= 512)` se volvió verdadera inmediatamente.
+  - El framework APF de la Analogue Pocket notifica las ranuras diferidas (`deferload`) enviando el comando host `0x008A` (`Data slot update`) inmediatamente después de concluir la descarga de la ROM (`Slot 1`).
+  - Para ese momento, la CPU R4600 ya había salido de reset y estaba en plena ejecución de la limpieza de framebuffer (POST de memoria).
+  - Al llegar `0x008A`, pulsó `img_mounted`, lo que activó la lógica heredada de MiSTer `img_reset` (un contador de 50.000 ciclos que asserting `core_reset`).
+  - Esto le propinó un **reseteo asíncrono y forzado a la CPU y al controlador SDRAM en pleno ciclo de ráfaga de memoria**, desincronizando el bus de SDRAM y abortando la CPU permanentemente en la línea 0 antes de poder barrer el resto de la pantalla.
+- **Solución RTL aplicada:**
+  - En [`ki_core_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_core_pocket.sv), desacoplado `img_reset` fijándolo a `1'b0`. En la Analogue Pocket la imagen de disco se configura estáticamente al lanzar el core y la CPU nunca debe ser reiniciada por eventos de ranura de datos posteriores.
+
+### 8. Instrucciones para recompilar en PC con Linux y Quartus Prime
 
 Para generar el nuevo bitstream con la corrección RTL:
 

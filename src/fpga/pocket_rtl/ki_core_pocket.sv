@@ -322,32 +322,11 @@ end
 
 wire shell_reset = RESET | buttons[1] | status[0] | ~pll_locked;
 
-reg [3:0]  img_reset_delay = 4'd0;
-reg [15:0] img_reset_count = 16'd0;
-
-always @(posedge clk_core) begin
-	if(shell_reset) begin
-		img_reset_delay <= 4'd0;
-		img_reset_count <= 16'd0;
-	end
-	else begin
-		if(img_mounted && hdd_image_present) begin
-			// Let ATA logic process the mount first.
-			img_reset_delay <= 4'd8;
-		end
-		else if(img_reset_delay != 0) begin
-			img_reset_delay <= img_reset_delay - 1'b1;
-
-			if(img_reset_delay == 1)
-				img_reset_count <= 16'd50000;
-		end
-		else if(img_reset_count != 0) begin
-			img_reset_count <= img_reset_count - 1'b1;
-		end
-	end
-end
-
-wire img_reset = (img_reset_count != 0);
+// Analogue Pocket: the disk image is configured at launch by APF, not mounted
+// mid-game via an OSD menu like on MiSTer. Triggering an asynchronous reset
+// when dataslot_update arrives interrupts the MIPS CPU mid-stride during its
+// boot self-test, corrupting the SDRAM memory pipeline and freezing on scanline 0.
+wire img_reset = 1'b0;
 
 wire core_reset = shell_reset | ioctl_download | img_reset;
 
