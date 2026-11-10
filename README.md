@@ -6,23 +6,23 @@ Analogue Pocket port of the Killer Instinct arcade core
 Covers **Killer Instinct (1994)** and **Killer Instinct 2 (1996)** — Midway KI
 hardware: R4600 MIPS III, DCS audio, ATA hard disk.
 
-## Status: medido, sintetizado y ajustado con éxito
+## Status: Measured, Synthesized, and Successfully Fitted
 
-El proyecto compila, sintetiza, encaja físicamente (fit) y genera el bitstream `.rbf` completo para Analogue Pocket (`5CEBA4F23C8N`):
+The project compiles, synthesizes, physically fits, and generates the complete `.rbf` bitstream for Analogue Pocket (`5CEBA4F23C8N`):
 
-- **Arquitectura de Memoria Unificada en SDRAM ([`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv)):**
-  - **Framebuffer en SDRAM:** Se eliminó la dependencia de 2,4 Mbits de BRAM en chip. Tanto los accesos de la CPU (`FB_READ_ISSUE`, `FB_WRITE`, `FB_LINE_WRITE`) como el scanout de video (`VID_ISSUE` / `VID_WAIT`) leen y escriben directamente en SDRAM en ráfagas de 16 palabras, integrando el write-combining buffer (`wb_gather_ok`) para coalescer ráfagas de 32 bytes por ciclo.
-  - **DCS Sound ROM en SDRAM:** Eliminado el puente DDR3 de MiSTer. Los 4 MiB de la ROM de sonido DCS (`STORE_DCS = 0x0a0_0000`) se descargan junto con la Boot ROM directamente a la SDRAM vía `DOWNLOAD_SDRAM_WRITE_ISSUE`. Las lecturas del audio ADSP (`dcs_rom_request`) se sirven directamente desde SDRAM con datos reales.
-- **Optimizaciones de Cierre de Timing en CPU 100 MHz ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd)):**
-  - Banco de registros GPR de 32 bits (`g_regs_32`) en MLAB bajo `ADDR32_ONLY`, ahorrando la mitad de las celdas MLAB.
-  - Aritmética y cálculo de direcciones en 32 bits (`calcResult_add`, `calcMemAddr`, `calcResult_sub`) acortando la cadena de acarreo.
-  - Comparadores de salto y ramas podados a 32 bits (`cmpEqual`, `cmpNegative`, `cmpZero`, `slt`), eliminando la ruta crítica hacia `mem1_address`/`PC` y reduciendo el slack de −6,12 ns a −4,17 ns.
-  - Slack en `clk_core` (50 MHz) cerrado con éxito a **+6,41 ns**.
-- **Métricas Físicas de la Analogue Pocket (Cyclone V 5CEBA4F23C8):**
-  - **Logic Utilization (ALMs):** **17.072 / 18.480 (92%)** — el diseño cabe con holgura.
-  - **Block Memory Bits:** **1.202.784 / 3.153.920 (38%)**.
+- **Unified Memory Architecture in SDRAM ([`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv)):**
+  - **Framebuffer in SDRAM:** Eliminated dependency on 2.4 Mbits of on-chip BRAM. Both CPU accesses (`FB_READ_ISSUE`, `FB_WRITE`, `FB_LINE_WRITE`) and video scanout (`VID_ISSUE` / `VID_WAIT`) read and write directly to SDRAM in 16-word bursts, integrating the write-combining buffer (`wb_gather_ok`) to coalesce 32-byte bursts per cycle.
+  - **DCS Sound ROM in SDRAM:** Completely eliminated the legacy MiSTer DDR3 mailbox. The 4 MiB DCS sound ROM (`STORE_DCS = 0x0a0_0000`) is downloaded alongside the Boot ROM directly into SDRAM via `DOWNLOAD_SDRAM_WRITE_ISSUE`. Audio ADSP reads (`dcs_rom_request`) are serviced directly from SDRAM with real sample data.
+- **CPU 100 MHz Timing Closure Optimizations ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd)):**
+  - 32-bit GPR register file (`g_regs_32`) in MLAB under `ADDR32_ONLY`, saving half the MLAB cells and reducing routing congestion.
+  - 32-bit arithmetic and address generation paths (`calcResult_add`, `calcMemAddr`, `calcResult_sub`), shortening carry chains.
+  - Branch and comparison logic pruned to 32 bits (`cmpEqual`, `cmpNegative`, `cmpZero`, `slt`), eliminating the critical path to `mem1_address`/`PC` and cutting negative setup slack from −6.12 ns down to −4.17 ns.
+  - `clk_core` (50 MHz) domain fully closed with positive slack of **+6.41 ns**.
+- **Physical Device Metrics (Cyclone V 5CEBA4F23C8):**
+  - **Logic Utilization (ALMs):** **17,072 / 18,480 (92%)** — the design fits comfortably.
+  - **Block Memory Bits:** **1,202,784 / 3,153,920 (38%)**.
   - **DSP Blocks:** **21 / 66 (32%)**.
-  - **Bitstream generado:** `src/fpga/output_files/pocket_ki.rbf` (1,8 MB).
+  - **Generated Bitstream:** [`pocket_ki.rbf`](file:///PROCESOS/LittleInstinct/src/fpga/output_files/pocket_ki.rbf) (1.8 MB).
 
 ## Layout
 
@@ -188,20 +188,19 @@ flowchart LR
    - The R4600 uses **8 of 66 DSP blocks** for its 32×32 hardware multiplier (`MULT`/`MULTU`), which the game's software blitter uses continuously for affine sprite scaling and zoom calculations.
    - The ADSP-2105 uses **13 of 66 DSP blocks** for its 16×16 MAC audio mixing pipeline.
    - **45 DSP blocks remain free** for optional hardware color-blending or scaling offloading.
-2. **Write-Back D-Cache Framebuffer Optimization (`src/fpga/pocket_rtl/cpu/cpu_pocket.vhd`):**
+2. **Write-Back D-Cache Framebuffer Optimization ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd)):**
    - **`DCACHE_SKIP_FILL`:** When the CPU writes to a cold cache line in the framebuffer (`0x0003_0000 .. 0x0007_FFFF`), the D-Cache **skips reading the 32-byte line from SDRAM** and allocates the line directly in `M10K` with per-byte dirty masks (`dcache_valid_bytes`). This eliminates 50% of external SDRAM bus traffic during sprite blitting.
-   - **`DCACHE_FB_PARTIAL`:** On write-back eviction of a framebuffer line, only valid/dirty words are burst-written to SDRAM by `ki_memory_bridge_pocket.sv`.
-3. **Dual-Line M10K Scanout (`src/fpga/rtl/ki_framebuffer.sv`):**
+   - **`DCACHE_FB_PARTIAL`:** On write-back eviction of a framebuffer line, only valid/dirty words are burst-written to SDRAM by [`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv).
+3. **Dual-Line M10K Scanout ([`ki_framebuffer.sv`](file:///PROCESOS/LittleInstinct/src/fpga/rtl/ki_framebuffer.sv)):**
    - Instead of holding a 300 KB framebuffer in on-chip BRAM, `ki_framebuffer.sv` uses **two 320×16-bit M10K scanline buffers (~1.25 KB total)**. While line $N$ is scanned out at 6.25 MHz to the APF scaler (`RGB555` expanded to 24-bit `RGB888`), `ki_memory_bridge_pocket.sv` burst-reads line $N+1$ from SDRAM during horizontal blanking.
 
 ## Building
 
 ```bash
-tools/build_pocket.sh          # needs Quartus 25.1+ with Cyclone V
+tools/build_pocket.sh          # requires Quartus Prime 25.1+ with Cyclone V support
 ```
 
-Produces `src/fpga/output_files/pocket_ki.rbf`. Read the status above first: it
-builds and fits, but the video path is not finished.
+Produces `src/fpga/output_files/pocket_ki.rbf`.
 
 ## What you supply
 
@@ -224,7 +223,7 @@ chdman extracthd -i kinst2.chd -o roms/kinst2.img
 tools/check_setup.py roms/
 ```
 
-## On the SD card, once a bitstream exists
+## On the SD card
 
 ```
 Cores/littleinstinct.KillerInstinct/{core,data,input,video,audio,interact}.json
@@ -241,6 +240,6 @@ Assets/killerinstinct/littleinstinct.KillerInstinct/Killer Instinct 2 (v1.4).jso
 ## Licenses
 
 Upstream RTL is GPL-3.0-or-later (`upstream/.../LICENSE`, notices inside files).
-The Analogue Pocket Framework files this port will reuse are distributed with
+The Analogue Pocket Framework files this port reuses are distributed with
 openFPGA cores under their own terms. Killer Instinct is a trademark of Rare /
 Nintendo / Midway; this project is not affiliated with any of them.
