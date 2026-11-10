@@ -1057,6 +1057,7 @@ module ki_memory_bridge #(
             wb_be[{wb_count[1:0], 3'd0} +: 8] <= active_write_mask;
             wb_count <= wb_count + 1'b1;
             wb_idle <= 6'd0;
+            fb_write_accept <= cpu_hits_fb;
             cpu_pending <= 1'b0;
             cpu_done <= 1'b1;
             // The write counters must not notice the difference.

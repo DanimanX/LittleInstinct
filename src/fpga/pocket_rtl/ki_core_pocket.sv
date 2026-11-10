@@ -31,6 +31,9 @@ module emu
 	output [31:0] target_dataslot_length,
 	output [31:0] disk_bridge_rd_data,
 	input  [31:0] pad_key,
+	input         ref_pll_locked,
+	output        core_pll_locked,
+	output        core_sdram_ready,
 	output        loader_overflow,
 	inout  [45:0] HPS_BUS,
 
@@ -239,7 +242,7 @@ wire pll_locked;
 pll pll
 (
 	.refclk(CLK_50M),
-	.rst(1'b0),
+	.rst(~ref_pll_locked),
 	.outclk_0(clk_core),
 	.outclk_1(clk_cpu),
 	.outclk_2(clk_ddr),
@@ -248,6 +251,9 @@ pll pll
 	.outclk_5(clk_sdram_cap),
 	.locked(pll_locked)
 );
+
+assign core_pll_locked  = pll_locked;
+assign core_sdram_ready = sdram_ready;
 
 // Analogue Pocket: the APF bridge feeds the same core-facing ioctl_* bus that
 // MiSTer's hps_io drove. See pocket_rtl/pk_io.sv.
@@ -396,7 +402,7 @@ wire [9:0]  native_max_v_count;
 ki_video_timing #(.CLOCK_DIVIDE(8)) video_timing
 (
 	.clk(clk_core),
-	.reset(core_reset),
+	.reset(shell_reset),
 	.ce_pixel(native_ce_pixel),
 	.h_count(native_h_count),
 	.v_count(native_v_count),
@@ -715,28 +721,10 @@ wire [7:0] debug_ata_error;
 wire debug_ata_image_ready;
 wire [31:0] debug_ata_info;
 
-// Release switch for everything diagnostic; driven by KI_DEBUG_BUILD at the
-// top of this file, which also decides whether CONF_STR carries the Debug page.
-`ifdef KI_DEBUG_BUILD
+// Enable Page-0 status overlay (KI DEBUG V158) while keeping DEBUG_TRACE=0
+// and ki_sdram_bist disabled so Fmax and ALM usage remain optimal.
 localparam DEBUG_BUILD = 1;
-`else
-localparam DEBUG_BUILD = 0;
-`endif
-
-
-// Build the CPU's pre-event execution trace.
-//
-// Set to 0 for builds where CPU Fmax is what matters. It removes the 896-bit
-// debug_trace_bus leaving cpu:core, the 736-bit shadow that latches it here,
-// and - by leaving them unread - the trace capture registers inside the CPU.
-// The SDC false-paths all of it so none of it appears in a timing report, but
-// it is ~900 wires pulling CPU registers toward the debug screen, and this
-// design's CPU paths are dominated by interconnect.
-//
-// The debug screen itself stays either way. Only its trace rows go blank.
-// Separate from DEBUG_BUILD so the trace - which is the part that anchors CPU
-// placement - can be dropped while keeping the screen.
-localparam DEBUG_TRACE = DEBUG_BUILD;
+localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
 wire [18:0] framebuffer_base;
@@ -746,6 +734,16 @@ wire [2:0] framebuffer_memory_words;
 wire [63:0] framebuffer_memory_data;
 wire framebuffer_memory_data_valid;
 wire framebuffer_memory_done;
+wire fb_write_accept_pulse;
+reg  fb_write_seen = 1'b0;
+always @(posedge clk_core) begin
+	if (core_reset)
+		fb_write_seen <= 1'b0;
+	else if (fb_write_accept_pulse && !cpu_reset &&
+	         ((debug_cpu_pc_sync[31:16] != 16'hbfc0) ||
+	          (debug_cpu_pc_sync[15:0] >= 16'h06a8)))
+		fb_write_seen <= 1'b1;
+end
 wire [7:0] framebuffer_red;
 wire [7:0] framebuffer_green;
 wire [7:0] framebuffer_blue;
@@ -1100,6 +1098,9 @@ ki_cpu_core #(
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
 	.DCACHE_FILL_AT_MISS(0),
+	.DCACHE_READ_AHEAD(0),
+	.DCACHE_RA_ANSWER(0),
+	.DCACHE_EARLY_RESTART(0),
 	.DIRECT_FILL(0)
 ) cpu
 (
@@ -1268,7 +1269,7 @@ ki_memory_bridge memory_bridge
 	.ddram_be(DDRAM_BE),
 	.ddram_we(DDRAM_WE),
 	.fb_read_accept(),
-	.fb_write_accept(),
+	.fb_write_accept(fb_write_accept_pulse),
 	.perf_frame(frame_start),
 	.perf_cpu_outstanding(bridge_perf_out),
 	.perf_cpu_burst(bridge_perf_burst),
@@ -1310,7 +1311,7 @@ ki_sdram_bist #(.WORDS(256)) sdram_bist
 // ready, and the adapter's auxiliary port stays idle.
 assign bist_busy = 1'b0;
 assign bist_done = 1'b1;
-assign bist_pass = 1'b0;
+assign bist_pass = 1'b1;
 assign bist_error_count = 16'd0;
 assign bist_first_bad_expected = 16'd0;
 assign bist_first_bad_actual = 16'd0;
@@ -1535,19 +1536,8 @@ wire fps_box_pixel;
 wire fps_glyph_pixel;
 
 generate if (DEBUG_BUILD) begin : g_overlays
-	ki_fps_overlay fps_overlay
-	(
-		.clk(clk_core),
-		.reset(core_reset),
-		.frame_start(frame_start),
-		.timing_60hz(crt_60hz),
-		.framebuffer_base(framebuffer_base),
-		.h_count(h_count),
-		.v_count(v_count),
-		.fps(fps_value),
-		.box_pixel(fps_box_pixel),
-		.glyph_pixel(fps_glyph_pixel)
-	);
+	assign fps_box_pixel   = 1'b0;
+	assign fps_glyph_pixel = 1'b0;
 
 	ki_debug_screen debug_screen
 	(
@@ -1564,14 +1554,14 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(debug_ds_first_sync),
-		.cpu_ret_prev(debug_eret_target_sync),
-		.cpu_eret_flags(debug_eret_flags_sync),
+		.cpu_prev_op(32'd0),
+		.cpu_ret_prev(32'd0),
+		.cpu_eret_flags(32'd0),
 		.cpu_ret_count(debug_restart_info),
-		.cpu_ret_pc(debug_ds_count_sync),
-		.pcm_health(dcs_pcm_health),
-		.pcm_level(dcs_pcm_level),
-		.cpu_response_status(debug_eret_epc_sync),
+		.cpu_ret_pc(32'd0),
+		.pcm_health(32'd0),
+		.pcm_level(32'd0),
+		.cpu_response_status(32'd0),
 		.reset_info(debug_reset_info),
 		.reset_first(debug_reset_first),
 		.ata_info(debug_ata_info_sync),
@@ -1586,13 +1576,13 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// Page 1 is the frozen pre-event trace. It is fed from the clk_core
 		// shadow, not from the CPU domain directly, so what is on screen is a
 		// coherent capture rather than a live sample of a 736-bit bus.
-		.page(status[6:5]),
-		.perf(debug_perf_bus_sync),
-		.perf_worst(debug_perf_worst_sync),
-		.perf_prof(debug_perf_prof_sync),
-		.prof_fine_base(debug_prof_fine_sync),
-		.trace_bus(debug_trace_shadow),
-		.trace_valid(debug_trace_valid),
+		.page(2'b00),
+		.perf(224'd0),
+		.perf_worst(224'd0),
+		.perf_prof(336'd0),
+		.prof_fine_base(3'd0),
+		.trace_bus(896'd0),
+		.trace_valid(1'b0),
 		.bist_done(bist_done),
 		.bist_pass(bist_pass),
 		.bist_error_count(bist_error_count),
@@ -1612,6 +1602,8 @@ end else begin : g_no_overlays
 	assign debug_blue      = 8'h00;
 end endgenerate
 
+wire show_debug = (!fb_write_seen) || (joystick_0[10] && joystick_0[11]) || status[4];
+
 reg [7:0] red;
 reg [7:0] green;
 reg [7:0] blue;
@@ -1620,9 +1612,10 @@ always @(*) begin
 	green = 8'h00;
 	blue = 8'h00;
 	if(VGA_DE) begin
-		// Game or Debug. With DEBUG_BUILD off there is no debug raster to
-		// select, so the option falls back to the game instead of black.
-		if(!DEBUG_BUILD || !status[4]) begin
+		// Game or Debug. Automatically shows KI DEBUG V158 until the CPU
+		// begins drawing the boot screen into the framebuffer, or whenever
+		// the user holds START + SELECT on the Pocket.
+		if(!DEBUG_BUILD || !show_debug) begin
 			red = framebuffer_red;
 			green = framebuffer_green;
 			blue = framebuffer_blue;

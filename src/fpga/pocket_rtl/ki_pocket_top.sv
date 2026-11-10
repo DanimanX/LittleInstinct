@@ -82,6 +82,7 @@ module ki_pocket_top (
 );
 	// ---------------------------------------------------------------- clocks
 	wire clk_core, clk_mem, clk_pix, clk_pix_90, pll_locked;
+	wire core_pll_locked, core_sdram_ready;
 
 	ki_pll u_pll (
 		.refclk     (clk_74a),
@@ -92,19 +93,19 @@ module ki_pocket_top (
 		.clk_pix_90 (clk_pix_90),
 		.locked     (pll_locked)
 	);
-	assign pll_locked_o = pll_locked;
+	assign pll_locked_o = pll_locked & core_pll_locked;
 
 	// ---------------------------------------------------------------- boot & reset
-	// boot_done notifies core_bridge_cmd (clk_74a domain) that clocks & PLL are locked
-	// and logic is ready for APF Host commands. It MUST NOT wait for apf_reset_n,
-	// because APF only releases reset_n via Host Command 0x0011 (Reset Exit) AFTER
-	// status_boot_done is asserted (otherwise a deadlock causes "Error in framework RS: Host commands ignored").
+	// boot_done notifies core_bridge_cmd (clk_74a domain) that clocks, both PLLs,
+	// and SDRAM power-up initialization are complete and ready for APF Host commands.
+	// It MUST NOT wait for apf_reset_n, because APF only releases reset_n via Host
+	// Command 0x0011 (Reset Exit) AFTER status_boot_done is asserted.
 	reg [3:0] boot_sync = 4'd0;
-	always @(posedge clk_74a) boot_sync <= {boot_sync[2:0], pll_locked};
+	always @(posedge clk_74a) boot_sync <= {boot_sync[2:0], (pll_locked & core_pll_locked & core_sdram_ready)};
 	assign boot_done = boot_sync[3];
 
 	reg [3:0] rst_sync = 4'd0;
-	always @(posedge clk_core) rst_sync <= {rst_sync[2:0], (apf_reset_n & pll_locked)};
+	always @(posedge clk_core) rst_sync <= {rst_sync[2:0], (apf_reset_n & pll_locked & core_pll_locked)};
 	wire core_reset_n = rst_sync[3];
 
 	// ---------------------------------------------------------------- core
@@ -153,6 +154,9 @@ module ki_pocket_top (
 		.target_dataslot_length     (target_dataslot_length),
 		.disk_bridge_rd_data        (disk_bridge_rd_data),
 		.pad_key                    (pad_key),
+		.ref_pll_locked             (pll_locked),
+		.core_pll_locked            (core_pll_locked),
+		.core_sdram_ready           (core_sdram_ready),
 		.loader_overflow            (loader_overflow),
 
 		.CLK_VIDEO        (CLK_VIDEO),

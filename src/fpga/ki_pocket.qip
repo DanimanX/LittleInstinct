@@ -58,7 +58,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) r
 # MiSTer-shell-only debug overlays: they draw into the MiSTer OSD/status, not the
 # core's own video, and cost BRAM. Left out of the Pocket build.
 # set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fps_overlay.sv ]
-# set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_debug_screen.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_debug_screen.sv ]
 # startup_osd_button is a MiSTer OSD helper (it presses the MiSTer's OSD button
 # after a ROM download). The core instantiates it, so it must be compiled, but on
 # the Pocket it does nothing useful.

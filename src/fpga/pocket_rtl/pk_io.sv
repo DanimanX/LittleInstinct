@@ -151,15 +151,17 @@ module pk_io #(
 	                 S_DIP      = 4'd1,
 	                 S_WAIT     = 4'd2,
 	                 S_RD       = 4'd3,
-	                 S_LO       = 4'd4,
-	                 S_HI       = 4'd5,
-	                 S_DONE     = 4'd6,
-	                 S_DISK_RD  = 4'd7,
-	                 S_DISK_LO  = 4'd8,
-	                 S_DISK_HI  = 4'd9,
-	                 S_WR_WAIT0 = 4'd10,
-	                 S_WR_LO    = 4'd11,
-	                 S_WR_HI    = 4'd12;
+	                 S_LATCH    = 4'd4,
+	                 S_LO       = 4'd5,
+	                 S_HI       = 4'd6,
+	                 S_POST     = 4'd7,
+	                 S_DONE     = 4'd8,
+	                 S_DISK_RD  = 4'd9,
+	                 S_DISK_LO  = 4'd10,
+	                 S_DISK_HI  = 4'd11,
+	                 S_WR_WAIT0 = 4'd12,
+	                 S_WR_LO    = 4'd13,
+	                 S_WR_HI    = 4'd14;
 
 	reg [3:0]  st = S_SEL;
 	reg [43:0] held = 44'd0;
@@ -290,21 +292,35 @@ module pk_io #(
 			end
 			S_RD: begin
 				ioctl_index <= 16'h0001;
+				st          <= S_LATCH;
+			end
+			S_LATCH: begin
+				ioctl_index <= 16'h0001;
+				held        <= fifo_dout;
 				st          <= S_LO;
 			end
 			S_LO: begin
-				held       <= fifo_dout;
-				ioctl_addr <= wr_addr;
-				ioctl_dout <= fifo_dout[15:0];
-				ioctl_wr   <= 1'b1;
-				st         <= S_HI;
+				ioctl_index <= 16'h0001;
+				if (!ioctl_wait) begin
+					ioctl_addr <= wr_addr;
+					ioctl_dout <= held[15:0];
+					ioctl_wr   <= 1'b1;
+					st         <= S_HI;
+				end
 			end
 			S_HI: begin
-				ioctl_addr <= wr_addr + 27'd2;
-				ioctl_dout <= held[31:16];
-				ioctl_wr   <= 1'b1;
-				wr_addr    <= wr_addr + 27'd4;
-				if (wr_addr + 27'd4 >= ROM_BYTES_27)
+				ioctl_index <= 16'h0001;
+				if (!ioctl_wait) begin
+					ioctl_addr <= wr_addr + 27'd2;
+					ioctl_dout <= held[31:16];
+					ioctl_wr   <= 1'b1;
+					wr_addr    <= wr_addr + 27'd4;
+					st         <= S_POST;
+				end
+			end
+			S_POST: begin
+				ioctl_index <= 16'h0001;
+				if (wr_addr >= ROM_BYTES_27)
 					st <= S_DONE;
 				else
 					st <= S_WAIT;
