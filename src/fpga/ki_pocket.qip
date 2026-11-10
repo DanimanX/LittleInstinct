@@ -23,7 +23,7 @@ set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/dp
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/divider.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_instrcache.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_cdc_fifo.vhd ]
-set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_datacache.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/cpu_datacache.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_TLB_instr.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_TLB_data.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_mul.vhd ]

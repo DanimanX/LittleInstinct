@@ -86,15 +86,16 @@ Current state, worst setup slack per clock (Slow 1100mV 85C):
 | `clk_sdram_cap` (DQ capture) | +0.11 | ✓ |
 | `KI_SDRAM_CLK` (DRAM pins) | +2.10 | ✓ |
 | **`clk_core` (50 MHz)** | **+6.41** | **✓ (Cerrado)** |
-| **`clk_cpu` (100 MHz)** | **−4.17** | **Optimizado (−2 ns respecto a −6.12 ns)** |
+| **`clk_cpu` (100 MHz)** | **−3.53** | **Mejorado (de −6.12 ns a −4.17 ns y ahora a −3.53 ns)** |
 
-So the DRAM interface, the APF side and `clk_core` are fully closed. The CPU critical path was reduced from −6.12 ns down to −4.17 ns by pruning 64-bit carry chains and register files down to 32 bits under `ADDR32_ONLY`.
+The previous critical path #1 (`dpram:\gtag:1:itagram` → `hit_way` → `read_hit` → `sb_park` → `cache_we_w` → `altsyncram:\gway:0:glane:0:icache:portbwe`, −4.18 ns) and critical path #2 (65-bit barrel shifter `ShiftRight0` → `resultData[9]`, −4.06 ns) were **100% eliminadas**.
 
-**Optimizaciones realizadas en CPU (`cpu_pocket.vhd`):**
+**Optimizaciones realizadas en CPU (`cpu_pocket.vhd` y `cpu_datacache.vhd`):**
 1. **Banco de Registros GPR de 32 bits:** Generación condicional de MLABs de 32 bits (`g_regs_32`) bajo `ADDR32_ONLY`, ahorrando la mitad de las celdas MLAB y liberando 32 líneas de interconexión por puerto.
-2. **Aritmética de Etapa 3:** Operaciones `calcResult_add`, `calcMemAddr` y `calcResult_sub` calculan directamente en 32 bits bajo `ADDR32_ONLY`, reduciendo los niveles lógicos del sumador a la mitad y acelerando `TLB_dataStall` y `executeMemAddress`.
-3. **Comparadores de Magnitud y Ramas:** `cmpEqual`, `cmpNegative`, `cmpZero` y los comparadores `slt`/`sltu` operan en rebanadas de 32 bits, eliminando 6 niveles lógicos de comparación de 64 bits hacia `FetchAddrSelect` y la etapa 1 (`mem1_address`/`PC`).
-4. **Mux de Resultados y Forwarding:** Muxing de 32 bits en `resultDataMuxed` con extensión inmediata de signo, agilizando el bypass hacia la etapa 4.
+2. **Aritmética de Etapa 3 y Shifter de 32 bits:** Operaciones `calcResult_add`, `calcMemAddr`, `calcResult_sub` y los desplazadores barrel shifters (`calcResult_shiftL`/`calcResult_shiftR`) operan directamente en 32 bits bajo `ADDR32_ONLY`, cortando la cadena de acarreo y eliminando los niveles de multiplexores de 65 bits.
+3. **Desacoplamiento de Write Enable en D-Cache (`cpu_datacache.vhd`):** Condicionamiento de escritura directa en `IDLE` con `st_direct_we` cuando `STORE_BUFFER` está activo. Las escrituras en `IDLE` se encolan en el store buffer en lugar de intentar escribir el array de datos combinacionalmente, rompiendo la ruta crítica entre la lectura de tags de BRAM y el `portbwe` del array de datos.
+4. **Desacoplamiento de drenado de Store Buffer:** `sb_drain_idle` desacoplado del tag compare (`sb_fwd_sel`), evaluando caminos sin pasar por `itagram`.
+5. **Comparadores de Magnitud y Ramas:** `cmpEqual`, `cmpNegative`, `cmpZero` y los comparadores `slt`/`sltu` operan en rebanadas de 32 bits, eliminando 6 niveles lógicos de comparación de 64 bits hacia `FetchAddrSelect` y la etapa 1 (`mem1_address`/`PC`).
 
 ## 4. Arquitectura de Memoria Unificada en SDRAM (`ki_memory_bridge_pocket.sv`)
 
@@ -114,9 +115,10 @@ So the DRAM interface, the APF side and `clk_core` are fully closed. The CPU cri
 
 - **It elaborates, synthesizes, fits and generates bitstream**:
   - `quartus_map`: 0 errors.
-  - `quartus_fit`: 0 errors, **17.072 / 18.480 ALMs (92% de utilización)**, 1.202.784 / 3.153.920 Block Memory Bits (38%).
+  - `quartus_fit`: 0 errors, **17.372 / 18.480 ALMs (94% de utilización)**, 1.202.784 / 3.153.920 Block Memory Bits (38%), 21 DSPs (32%).
   - `quartus_asm`: 0 errors, `output_files/pocket_ki.rbf` (1,8 MB) generado exitosamente.
-  - `quartus_sta`: `clk_core` cerrado (+6,41 ns), `clk_cpu` reducido a −4,17 ns.
+  - `quartus_sta`: `clk_core` cerrado (+6,41 ns), `clk_cpu` reducido a −3,53 ns.
+  - **Empaquetado APF**: `tools/package_pocket.py` genera el árbol `Release/sd_card/` y el archivo `Release/LittleInstinct_Pocket_v1.0.0.zip` listo para desplegar en microSD.
 - **The loader**: not verified. There is no simulator (Questa is installed but
   unlicensed; `vsim` exits with "Unable to checkout a license"), so `pk_io`'s
   FIFO and FSM are unexecuted. It is the first thing to test on hardware.

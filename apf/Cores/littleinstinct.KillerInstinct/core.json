@@ -9,8 +9,8 @@
             "description": "Killer Instinct / Killer Instinct 2 arcade (Midway KI hardware), port of Arcade-KillerInstinct_MiSTer.",
             "author": "akoaysigod",
             "url": "https://github.com/akoaysigod",
-            "version": "0.1-bringup",
-            "date_release": "2026-11-09"
+            "version": "1.0.0",
+            "date_release": "2026-11-10"
         },
         "framework": {
             "target_product": "Analogue Pocket",

@@ -13,16 +13,18 @@ The project compiles, synthesizes, physically fits, and generates the complete `
 - **Unified Memory Architecture in SDRAM ([`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv)):**
   - **Framebuffer in SDRAM:** Eliminated dependency on 2.4 Mbits of on-chip BRAM. Both CPU accesses (`FB_READ_ISSUE`, `FB_WRITE`, `FB_LINE_WRITE`) and video scanout (`VID_ISSUE` / `VID_WAIT`) read and write directly to SDRAM in 16-word bursts, integrating the write-combining buffer (`wb_gather_ok`) to coalesce 32-byte bursts per cycle.
   - **DCS Sound ROM in SDRAM:** Completely eliminated the legacy MiSTer DDR3 mailbox. The 4 MiB DCS sound ROM (`STORE_DCS = 0x0a0_0000`) is downloaded alongside the Boot ROM directly into SDRAM via `DOWNLOAD_SDRAM_WRITE_ISSUE`. Audio ADSP reads (`dcs_rom_request`) are serviced directly from SDRAM with real sample data.
-- **CPU 100 MHz Timing Closure Optimizations ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd)):**
+- **CPU 100 MHz Timing Closure Optimizations ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd) & [`cpu_datacache.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_datacache.vhd)):**
   - 32-bit GPR register file (`g_regs_32`) in MLAB under `ADDR32_ONLY`, saving half the MLAB cells and reducing routing congestion.
-  - 32-bit arithmetic and address generation paths (`calcResult_add`, `calcMemAddr`, `calcResult_sub`), shortening carry chains.
-  - Branch and comparison logic pruned to 32 bits (`cmpEqual`, `cmpNegative`, `cmpZero`, `slt`), eliminating the critical path to `mem1_address`/`PC` and cutting negative setup slack from −6.12 ns down to −4.17 ns.
+  - 32-bit arithmetic, address generation, and 32-bit barrel shifter paths (`calcResult_shiftL`/`calcResult_shiftR`), eliminating 65-bit shifter routing delays.
+  - Decoupling of D-Cache write enables: `st_direct_we` prevents unclocked combinatorial writes in `IDLE` when `STORE_BUFFER` is active, completely eliminating the -4.18 ns critical path from `itagram` to `portbwe`.
+  - Disconnected tag match dependency from `sb_drain_idle` (`sb_fwd_sel`), removing tag lookup from data RAM port b arbitration.
   - `clk_core` (50 MHz) domain fully closed with positive slack of **+6.41 ns**.
 - **Physical Device Metrics (Cyclone V 5CEBA4F23C8):**
-  - **Logic Utilization (ALMs):** **17,072 / 18,480 (92%)** — the design fits comfortably.
+  - **Logic Utilization (ALMs):** **17,372 / 18,480 (94%)** — the design fits comfortably.
   - **Block Memory Bits:** **1,202,784 / 3,153,920 (38%)**.
   - **DSP Blocks:** **21 / 66 (32%)**.
   - **Generated Bitstream:** [`pocket_ki.rbf`](file:///PROCESOS/LittleInstinct/src/fpga/output_files/pocket_ki.rbf) (1.8 MB).
+  - **APF Release Package:** Ready for installation under [`Release/`](file:///PROCESOS/LittleInstinct/Release/) with bit-reversed [`bitstream.rbf_r`](file:///PROCESOS/LittleInstinct/Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r) and ready-to-extract ZIP archive.
 
 ## Layout
 

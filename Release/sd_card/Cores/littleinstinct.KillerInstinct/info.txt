@@ -1,0 +1,21 @@
+Killer Instinct / Killer Instinct 2 for Analogue Pocket (openFPGA).
+
+Port of the arcade core Arcade-KillerInstinct_MiSTer (Midway KI hardware:
+R4600 MIPS III 64/32-bit + DCS audio with ADSP-2105 + ATA IDE streaming).
+
+Architecture:
+- Target: Analogue Pocket (Intel Cyclone V 5CEBA4F23C8N, 49k LEs)
+- CPU: MIPS R4600 trimmed for fixed-point arcade execution (no FPU, ADDR32_ONLY, 32-bit MLAB GPRs)
+- Memory: Unified 64 MB SDRAM arbiter for Low RAM, Main RAM, Boot ROM, DCS Sound ROM and Framebuffer
+- Video: 320x240 @ 60Hz double framebuffer in SDRAM with 2x M10K line-buffer scanout
+- Sound: Midway DCS audio DSP (ADSP-2105) running at 31.25 kHz with 16-bit stereo output over I2S
+- Storage: ATA IDE streaming emulation backed by APF Deferred Data Slot 2 (microSD)
+
+Required Assets on MicroSD card:
+  Assets/killerinstinct/common/kinst.rom    (Killer Instinct 1 ROM, 4.5 MB)
+  Assets/killerinstinct/common/kinst.img    (Killer Instinct 1 CHD sector image, ~130 MB)
+  Assets/killerinstinct/common/kinst2.rom   (Killer Instinct 2 ROM, 4.5 MB)
+  Assets/killerinstinct/common/kinst2.img   (Killer Instinct 2 CHD sector image, ~140 MB)
+
+ROMs and disk images are NOT included: they are copyrighted Midway/Rare
+content. Build the .rom from your own MAME dumps using tools/build_rom.py.

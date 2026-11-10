@@ -4340,13 +4340,34 @@ begin
                    '0' & value1(4 downto 0) when (decodeShiftAmountType = "01") else
                    value1(5 downto 0);
    
-   -- multiplex high bit of rightshift so arithmetic shift can be reused for logical shift
-   shiftValue(31 downto 0)  <= signed(value2(31 downto 0));
-   shiftValue(63 downto 32) <= (others => '0') when (decodeShift32 = '1') else signed(value2(63 downto 32));
-   shiftValue(64) <= value2(63) when (decodeShiftSigned = '1') else '0';
+   g_shift_32 : if ADDR32_ONLY generate
+      signal shiftValue32 : signed(32 downto 0);
+      signal shiftRes32R  : unsigned(31 downto 0);
+      signal shiftRes32L  : unsigned(31 downto 0);
+   begin
+      shiftValue(31 downto 0)  <= signed(value2(31 downto 0));
+      shiftValue(63 downto 32) <= (others => '0');
+      shiftValue(64)           <= '0';
 
-   calcResult_shiftL <= value2 sll to_integer(executeShamt);
-   calcResult_shiftR <= resize(unsigned(shift_right(shiftValue,to_integer(executeShamt))), 64);  
+      shiftValue32(31 downto 0) <= signed(value2(31 downto 0));
+      shiftValue32(32)          <= value2(31) when (decodeShiftSigned = '1') else '0';
+
+      shiftRes32L <= value2(31 downto 0) sll to_integer(executeShamt(4 downto 0));
+      shiftRes32R <= unsigned(shift_right(shiftValue32, to_integer(executeShamt(4 downto 0)))(31 downto 0));
+
+      calcResult_shiftL <= unsigned(resize(signed(shiftRes32L), 64)) when (decodeResult32 = '1') else resize(shiftRes32L, 64);
+      calcResult_shiftR <= unsigned(resize(signed(shiftRes32R), 64)) when (decodeResult32 = '1') else resize(shiftRes32R, 64);
+   end generate;
+
+   g_shift_64 : if not ADDR32_ONLY generate
+      -- multiplex high bit of rightshift so arithmetic shift can be reused for logical shift
+      shiftValue(31 downto 0)  <= signed(value2(31 downto 0));
+      shiftValue(63 downto 32) <= (others => '0') when (decodeShift32 = '1') else signed(value2(63 downto 32));
+      shiftValue(64) <= value2(63) when (decodeShiftSigned = '1') else '0';
+
+      calcResult_shiftL <= value2 sll to_integer(executeShamt);
+      calcResult_shiftR <= resize(unsigned(shift_right(shiftValue,to_integer(executeShamt))), 64);
+   end generate;
 
    ---------------------- Sub ------------------
    calcResult_sub(31 downto 0)  <= value1(31 downto 0) - value2(31 downto 0);
