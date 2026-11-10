@@ -989,14 +989,6 @@ module ki_memory_bridge #(
         IDLE: begin
           if (wb_flush_needed) begin
             state <= SDRAM_WB_FLUSH_ISSUE;
-          end else if (video_request && !video_done && !vid_inflight) begin
-            vid_inflight <= 1'b1;
-            state <= VID_ISSUE;
-          end else if (dcs_rom_request && !dcs_rom_ready && !dcs_rom_inflight && !dcs_rom_request_seen_level) begin
-            dcs_rom_req_addr <= dcs_rom_address;
-            dcs_rom_inflight <= 1'b1;
-            dcs_rom_request_seen_level <= 1'b1;
-            state <= DCS_ROM_READ_ISSUE;
           end else if (download_count != 0) begin
             if (!download_inflight) begin
               memory_word_address <= {
@@ -1006,6 +998,14 @@ module ki_memory_bridge #(
               download_inflight <= 1'b1;
               state <= DOWNLOAD_SDRAM_WRITE_ISSUE;
             end
+          end else if (video_request && !video_done && !vid_inflight) begin
+            vid_inflight <= 1'b1;
+            state <= VID_ISSUE;
+          end else if (dcs_rom_request && !dcs_rom_ready && !dcs_rom_inflight && !dcs_rom_request_seen_level) begin
+            dcs_rom_req_addr <= dcs_rom_address;
+            dcs_rom_inflight <= 1'b1;
+            dcs_rom_request_seen_level <= 1'b1;
+            state <= DCS_ROM_READ_ISSUE;
           end else if (fb_line_req) begin
             // Acknowledged here, as the SDRAM line path above is, and safe for
             // the same reason: the state machine is serial, so no CPU read of

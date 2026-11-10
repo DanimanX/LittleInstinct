@@ -303,7 +303,18 @@ Registro de errores de inicialización del framework APF detectados en hardware 
     ```
   - `core_reset_n` continúa gobernando la lógica interna del R4600 y KI arcade hardware esperando a `apf_reset_n`.
 
-### 5. Instrucciones para recompilar en PC con Linux y Quartus Prime
+### 5. Pantalla congelada con barras horizontales / raster residual (FIFO de ROM en `aclr`)
+- **Síntoma:** Al seleccionar el juego, la barra inferior de carga de la Pocket se llena al 100%, pero la pantalla queda congelada mostrando un patrón de barras horizontales blancas y negras con puntos (patrón residual de la SDRAM al encender). La CPU nunca inicia el test de RAM azul.
+- **Causa raíz en RTL ([`ki_core_pocket.sv`](file:///Users/danimanx/code/LittleInstinct/src/fpga/pocket_rtl/ki_core_pocket.sv#L255)):**
+  - La instancia [`pk_io`](file:///Users/danimanx/code/LittleInstinct/src/fpga/pocket_rtl/pk_io.sv) estaba conectada con `.apf_reset_n(~RESET)`.
+  - La Pocket transfiere los 4.7 MB de la ROM mientras mantiene el reset de la CPU (`RESET = 1`, por lo que `~RESET = 0`).
+  - Al recibir `apf_reset_n = 0`, la FIFO de recepción de la ROM (`dcfifo.aclr`) se mantenía en borrado asíncrono permanente durante toda la transferencia.
+  - Como consecuencia, todos los paquetes de la ROM eran descartados sin llegar a la SDRAM; al levantarse el reset (`0x0011`), `pk_io` entraba en `S_WAIT` esperando datos de una FIFO vacía y manteniendo la CPU R4600 en reset perpetuo vía `ioctl_download`.
+- **Solución RTL aplicada:**
+  - En `ki_core_pocket.sv`, conectado `.apf_reset_n(pll_locked)` para que la FIFO y la FSM de descarga operen y graben en la SDRAM durante la fase de carga previa a la liberación del reset.
+  - En `ki_memory_bridge_pocket.sv`, priorizada la escritura de descarga a la SDRAM (`download_count != 0`) por encima del escaneo de video en estado `IDLE`.
+
+### 6. Instrucciones para recompilar en PC con Linux y Quartus Prime
 
 Para generar el nuevo bitstream con la corrección RTL:
 

@@ -252,7 +252,7 @@ pll pll
 pk_io #(.ROM_BYTES(4718592)) pk_io
 (
 	.clk_74a                    (clk_74a),
-	.apf_reset_n                (~RESET),
+	.apf_reset_n                (pll_locked),
 	.bridge_addr                (bridge_addr),
 	.bridge_wr                  (bridge_wr),
 	.bridge_wr_data             (bridge_wr_data),
