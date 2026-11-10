@@ -264,11 +264,9 @@ Registro de errores de inicialización del framework APF detectados en hardware 
 - **Causa:** 
   1. El Core ID en openFPGA se calcula estrictamente como `<author>.<shortname>`. En `core.json` figuraba `"author": "DanimanX"` mientras que la carpeta en la MicroSD era `Cores/littleinstinct.KillerInstinct/`. Al discrepar el nombre del directorio esperado (`DanimanX.KillerInstinct`), la Pocket abortaba el setup.
   2. El Slot 1 de ROM en `data.json` tenía el Bit 1 activo (`0x10A`), forzando la búsqueda en la carpeta específica del core en lugar de `Assets/killerinstinct/common/`.
-  3. Las instancias JSON tenían `"data_path": ""` vacío.
 - **Solución aplicada:**
   - Ajustado `"author": "littleinstinct"` en `core.json`.
   - Corregido Slot 1 a `"parameters": "0x108"` en `data.json` (modo archivo común de plataforma + sólo lectura, idéntico al estándar de Jotego).
-  - Configurado `"data_path": "common/"` en las instancias JSON.
 
 ### 2. `Load error in 'variants'. General error. Error in core setup`
 - **Causa:** El firmware de la Analogue Pocket exige la existencia de `variants.json` en el directorio del core antes de transferir slots. Al no existir, el bootloader fallaba de inmediato.
@@ -276,7 +274,14 @@ Registro de errores de inicialización del framework APF detectados en hardware 
   - Incorporado [`variants.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/variants.json) con lista de variantes vacía (`"variant_list": []`).
   - Incorporados descriptores auxiliares estándar APF: [`video.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/video.json) (escalador 320×240 a 4:3 con filtros CRT/LCD), [`audio.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/audio.json) e [`interact.json`](file:///Users/danimanx/code/LittleInstinct/apf/Cores/littleinstinct.KillerInstinct/interact.json).
 
-### 3. `Error in framework. RS: Host commands ignored` (Deadlock RTL en `boot_done`)
+### 3. `Error in framework: no file for rom id [1]`
+- **Causa:** Al estar el Slot 1 configurado con `"parameters": "0x108"`, el framework APF ya resuelve la ruta base como `Assets/<platform>/common/`. Al tener las instancias JSON `"data_path": "common/"`, la Pocket intentaba resolver la ruta como `Assets/killerinstinct/common/common/kinst.rom`, provocando que no encontrara la ROM.
+- **Solución aplicada:**
+  - Corregido `"data_path": ""` (cadena vacía) en las instancias JSON, con `"variant_select": { "id": 0, "select": false }` según el estándar de openFPGA arcade.
+  - Eliminado `"size_exact"` de `data.json` para evitar validaciones de tamaño excesivamente estrictas del firmware.
+  - Como redundancia en la MicroSD, se aseguraron copias de la ROM tanto en la ruta común como en la carpeta específica del core.
+
+### 4. `Error in framework. RS: Host commands ignored` (Deadlock RTL en `boot_done`)
 - **Síntoma:** El bitstream se carga exitosamente en la FPGA, pero durante el handshake con el chip host APF de la Pocket, la consola entra en timeout y aborta con `RS: Host commands ignored`.
 - **Causa raíz en RTL ([`ki_pocket_top.sv`](file:///Users/danimanx/code/LittleInstinct/src/fpga/pocket_rtl/ki_pocket_top.sv)):**
   - La señal `boot_done` estaba asignada a `core_reset_n`:
@@ -298,7 +303,7 @@ Registro de errores de inicialización del framework APF detectados en hardware 
     ```
   - `core_reset_n` continúa gobernando la lógica interna del R4600 y KI arcade hardware esperando a `apf_reset_n`.
 
-### 4. Instrucciones para recompilar en PC con Linux y Quartus Prime
+### 5. Instrucciones para recompilar en PC con Linux y Quartus Prime
 
 Para generar el nuevo bitstream con la corrección RTL:
 
