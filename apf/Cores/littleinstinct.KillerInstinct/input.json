@@ -1,0 +1,77 @@
+{
+    "input": {
+        "magic": "APF_VER_1",
+        "controllers": [
+            {
+                "type": "default",
+                "mappings": [
+                    {
+                        "id": 3,
+                        "name": "Up",
+                        "key": "pad_dpad_up"
+                    },
+                    {
+                        "id": 2,
+                        "name": "Down",
+                        "key": "pad_dpad_down"
+                    },
+                    {
+                        "id": 1,
+                        "name": "Left",
+                        "key": "pad_dpad_left"
+                    },
+                    {
+                        "id": 0,
+                        "name": "Right",
+                        "key": "pad_dpad_right"
+                    },
+                    {
+                        "id": 4,
+                        "name": "Quick Punch (QP)",
+                        "key": "pad_btn_y"
+                    },
+                    {
+                        "id": 5,
+                        "name": "Medium Punch (MP)",
+                        "key": "pad_btn_x"
+                    },
+                    {
+                        "id": 6,
+                        "name": "Fierce Punch (FP)",
+                        "key": "pad_trig_l"
+                    },
+                    {
+                        "id": 7,
+                        "name": "Quick Kick (QK)",
+                        "key": "pad_btn_b"
+                    },
+                    {
+                        "id": 8,
+                        "name": "Medium Kick (MK)",
+                        "key": "pad_btn_a"
+                    },
+                    {
+                        "id": 9,
+                        "name": "Fierce Kick (FK)",
+                        "key": "pad_trig_r"
+                    },
+                    {
+                        "id": 10,
+                        "name": "1P Start",
+                        "key": "pad_btn_start"
+                    },
+                    {
+                        "id": 11,
+                        "name": "Insert Coin",
+                        "key": "pad_btn_select"
+                    },
+                    {
+                        "id": 12,
+                        "name": "Service / Test Menu",
+                        "key": "pad_trig_l2"
+                    }
+                ]
+            }
+        ]
+    }
+}
