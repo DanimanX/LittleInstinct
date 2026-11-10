@@ -14,7 +14,8 @@
 // Gastineau). The Killer Instinct RTL and this file are GPL-3.0, like the
 // upstream core they come from.
 //
-// Milestone 1: video path only. See pocket_rtl/ki_pocket_top.sv.
+// Bring-up: the full core (R4600, DCS, ATA, memory bridge) with the Pocket's
+// data slots, DRAM bus, video and I2S attached. See pocket_rtl/ki_pocket_top.sv.
 //
 `default_nettype none
 
@@ -304,15 +305,8 @@ assign cram1_we_n = 1'b1;
 assign cram1_ub_n = 1'b1;
 assign cram1_lb_n = 1'b1;
 
-assign dram_a    = 13'd0;
-assign dram_ba   = 2'd0;
-assign dram_dq   = 16'hzzzz;
-assign dram_dqm  = 2'b11;
-assign dram_clk  = 1'b0;
-assign dram_cke  = 1'b0;
-assign dram_ras_n = 1'b1;
-assign dram_cas_n = 1'b1;
-assign dram_we_n  = 1'b1;
+// The DRAM bus (dram_*) is driven by the core: ki_pocket_top maps the core's
+// SDR SDRAM pins onto it. cram/sram stay tied off -- nothing uses them.
 
 assign sram_a    = 17'd0;
 assign sram_dq   = 16'hzzzz;
@@ -398,9 +392,8 @@ end
 
 // bridge target commands
 // synchronous to clk_74a
-// Milestone 1 declares them and ties them off: the deferred disk-image reads
-// (the ATA path) are milestone 3.
-    wire            target_dataslot_read = 1'b0;
+// Driven by ki_pocket_top -> pk_io for deferred disk-image sector reads (ATA).
+    wire            target_dataslot_read;
     wire            target_dataslot_write = 1'b0;
     wire            target_dataslot_getfile = 1'b0;
     wire            target_dataslot_openfile = 1'b0;
@@ -506,14 +499,30 @@ core_bridge_cmd icb (
 ////////////////////////////////////////////////////////////////////////////////////////
 // Killer Instinct video path (milestone 1)
 
-    wire        clk_audio;
-    wire signed [15:0] audio_l, audio_r;
-    wire [15:0] status_word;
-    wire        pattern_done;
+    wire        loader_overflow;
+    wire        pll_locked_core;
 
 ki_pocket_top iki (
-    .clk_74a            ( clk_74a ),
-    .apf_reset_n        ( reset_n ),
+    .clk_74a                    ( clk_74a ),
+    .apf_reset_n                ( reset_n ),
+
+    .bridge_addr                ( bridge_addr ),
+    .bridge_wr                  ( bridge_wr ),
+    .bridge_wr_data             ( bridge_wr_data ),
+
+    .dataslot_update            ( dataslot_update ),
+    .dataslot_update_id         ( dataslot_update_id ),
+    .dataslot_update_size       ( dataslot_update_size ),
+    .target_dataslot_read       ( target_dataslot_read ),
+    .target_dataslot_ack        ( target_dataslot_ack ),
+    .target_dataslot_done       ( target_dataslot_done ),
+    .target_dataslot_err        ( target_dataslot_err ),
+    .target_dataslot_id         ( target_dataslot_id ),
+    .target_dataslot_slotoffset ( target_dataslot_slotoffset ),
+    .target_dataslot_bridgeaddr ( target_dataslot_bridgeaddr ),
+    .target_dataslot_length     ( target_dataslot_length ),
+
+    .pad_key                    ( cont1_key ),
 
     .video_rgb          ( video_rgb ),
     .video_rgb_clock    ( video_rgb_clock ),
@@ -523,30 +532,30 @@ ki_pocket_top iki (
     .video_vs           ( video_vs ),
     .video_hs           ( video_hs ),
 
-    .clk_audio          ( clk_audio ),
-    .audio_l            ( audio_l ),
-    .audio_r            ( audio_r ),
+    .audio_mclk         ( audio_mclk ),
+    .audio_lrck         ( audio_lrck ),
+    .audio_dac          ( audio_dac ),
+
+    .dram_a             ( dram_a ),
+    .dram_ba            ( dram_ba ),
+    .dram_dq            ( dram_dq ),
+    .dram_dqm           ( dram_dqm ),
+    .dram_clk           ( dram_clk ),
+    .dram_cke           ( dram_cke ),
+    .dram_ras_n         ( dram_ras_n ),
+    .dram_cas_n         ( dram_cas_n ),
+    .dram_we_n          ( dram_we_n ),
 
     .boot_done          ( boot_done ),
-    .status_word        ( status_word ),
-    .pattern_done       ( pattern_done )
+    .loader_overflow    ( loader_overflow ),
+    .pll_locked_o       ( pll_locked_core )
 );
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // audio: 48 kHz I2S to the Pocket's DAC
 
-sound_i2s #(
-    .CHANNEL_WIDTH ( 16 ),
-    .SIGNED_INPUT  ( 1 )
-) isound (
-    .clk_74a    ( clk_74a ),
-    .clk_audio  ( clk_audio ),
-    .audio_l    ( audio_l ),
-    .audio_r    ( audio_r ),
-    .audio_mclk ( audio_mclk ),
-    .audio_lrck ( audio_lrck ),
-    .audio_dac  ( audio_dac )
-);
+// sound_i2s lives inside ki_pocket_top: the core's audio leaves from there.
+
 
 // audio_adc is unused: the Pocket's ADC input is not wired to anything in KI.
 

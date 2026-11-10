@@ -1,33 +1,52 @@
-// ki_pocket_top: the Killer Instinct video path on the Analogue Pocket.
+// ki_pocket_top: the Killer Instinct core on an Analogue Pocket.
 //
-// MILESTONE 1 (this file): APF clocks, reset, the core's own video timing and
-// framebuffer, and a test pattern in the framebuffer RAM. It builds an RBF that
-// boots on the Pocket and shows a picture. It is NOT the game: the R4600, the
-// DCS, the ATA disk and the memory bridge are not instantiated yet, because the
-// memory plan they need is still open (see docs/FEASIBILITY.md).
+// This instantiates the real core -- R4600, memory bridge, DCS audio, ATA, video
+// timing -- through `emu` in ki_core_pocket.sv, which is upstream
+// KillerInstinct.sv with one change: the MiSTer HPS shell (hps_io) is replaced
+// by pk_io, driven from the APF bridge.
 //
-// Everything here except the pattern writer and the scanout adapter is the
-// upstream core's own RTL, unmodified: ki_video_timing, ki_framebuffer and
-// ki_fb_ram are the same modules MiSTer runs.
+// What this file provides, and what it does not:
 //
-// Clocks (ki_pll): clk_core 50 MHz, clk_mem 100 MHz, clk_pix 6.25 MHz,
-// clk_pix_90 6.25 MHz shifted 90 degrees.
-//
-// Video: ki_video_timing is clocked AT the pixel clock with CLOCK_DIVIDE = 1,
-// so ce_pixel is asserted every cycle. On MiSTer it runs on 50 MHz with
-// CLOCK_DIVIDE = 8; the counters, and therefore the timing, are identical:
-// 406 x 261 at 6.25 MHz = 15.39 kHz / 58.98 Hz, the native KI video.
+//   clocks   50 MHz core (from ki_pll), 6.25 MHz APF pixel clock. The core's own
+//            PLL runs from that 50 MHz reference and produces CLK_VIDEO = clk_core
+//            = 50 MHz, so CE_PIXEL = 50/8 = 6.25 MHz: exactly the APF pixel rate,
+//            and the video capture needs no rate adapter.
+//   ROM      data slot 1 -> pk_io -> ioctl stream -> boot ROM + DCS image.
+//   memory   the core's SDR SDRAM pins go to the Pocket's 64 MB dram_* bus:
+//            same protocol, and ki_sdram_burst already speaks it.
+//   video    320x240 RGB555 at 6.25 MHz into the APF DDR converters.
+//   audio    DCS mono 31.25 kHz into sound_i2s (48 kHz I2S).
+//   disk     NOT connected. img_size = 0, so the core reports no hard disk.
+//   DCS ROM  NOT backed. The core streams the 4 MiB sound ROM from DDR3 on
+//            MiSTer; the Pocket has no DDR3. Here the DDR port answers 0xFF
+//            immediately, so the stream cannot hang but the audio program is
+//            invalid. This is the largest remaining piece of work.
 `default_nettype none
 
-module ki_pocket_top #(
-	// 320x240 RGB555, two pages. ki_memory_bridge compacts them to 38400
-	// 64-bit words; page 0 starts at low RAM 0x30000, page 1 at 0x58000.
-	parameter logic [31:0] FB0_LOW = 32'h0003_0000,
-	parameter logic [31:0] FB1_LOW = 32'h0005_8000
-) (
-	// clocks and reset from the APF side
+module ki_pocket_top (
 	input  wire        clk_74a,
-	input  wire        apf_reset_n,      // high = run
+	input  wire        apf_reset_n,
+
+	// APF bridge (the ROM slot and deferred disk sector reads arrive here)
+	input  wire [31:0] bridge_addr,
+	input  wire        bridge_wr,
+	input  wire [31:0] bridge_wr_data,
+
+	// APF deferred data slot (ATA hard disk emulation)
+	input  wire        dataslot_update,
+	input  wire [15:0] dataslot_update_id,
+	input  wire [31:0] dataslot_update_size,
+	output wire        target_dataslot_read,
+	input  wire        target_dataslot_ack,
+	input  wire        target_dataslot_done,
+	input  wire  [2:0] target_dataslot_err,
+	output wire [15:0] target_dataslot_id,
+	output wire [31:0] target_dataslot_slotoffset,
+	output wire [31:0] target_dataslot_bridgeaddr,
+	output wire [31:0] target_dataslot_length,
+
+	// APF pad
+	input  wire [31:0] pad_key,
 
 	// APF video, into apf_top's DDR converters
 	output wire [23:0] video_rgb,
@@ -38,15 +57,26 @@ module ki_pocket_top #(
 	output wire        video_vs,
 	output wire        video_hs,
 
-	// APF audio (I2S), driven by sound_i2s in core_top
-	output wire        clk_audio,
-	output wire signed [15:0] audio_l,
-	output wire signed [15:0] audio_r,
+	// APF audio (I2S)
+	output wire        audio_mclk,
+	output wire        audio_lrck,
+	output wire        audio_dac,
 
-	// status back to core_top / core_bridge_cmd
+	// Pocket DRAM: the core's SDR SDRAM pins
+	output wire [12:0] dram_a,
+	output wire  [1:0] dram_ba,
+	inout  wire [15:0] dram_dq,
+	output wire  [1:0] dram_dqm,
+	output wire        dram_clk,
+	output wire        dram_cke,
+	output wire        dram_ras_n,
+	output wire        dram_cas_n,
+	output wire        dram_we_n,
+
+	// status
 	output wire        boot_done,
-	output wire [15:0] status_word,
-	output wire        pattern_done
+	output wire        loader_overflow,
+	output wire        pll_locked_o
 );
 	// ---------------------------------------------------------------- clocks
 	wire clk_core, clk_mem, clk_pix, clk_pix_90, pll_locked;
@@ -54,231 +84,203 @@ module ki_pocket_top #(
 	ki_pll u_pll (
 		.refclk     (clk_74a),
 		.rst        (1'b0),
-		.clk_core   (clk_core),
-		.clk_mem    (clk_mem),
-		.clk_pix    (clk_pix),
+		.clk_core   (clk_core),      // 50 MHz = emu's CLK_50M
+		.clk_mem    (clk_mem),       // 100 MHz (unused here; the core makes its own)
+		.clk_pix    (clk_pix),       // 6.25 MHz APF pixel clock
 		.clk_pix_90 (clk_pix_90),
 		.locked     (pll_locked)
 	);
+	assign pll_locked_o = pll_locked;
 
 	// ---------------------------------------------------------------- reset
-	// PLL locked and the host running. Both are asynchronous to clk_pix; two
-	// flops each, then a synchronous release.
-	reg [2:0] rst_sync = 3'b000;
-	always @(posedge clk_pix)
-		rst_sync <= {rst_sync[1:0], (apf_reset_n & pll_locked)};
-	wire core_reset = ~rst_sync[2];
+	reg [3:0] rst_sync = 4'd0;
+	always @(posedge clk_core) rst_sync <= {rst_sync[2:0], (apf_reset_n & pll_locked)};
+	wire core_reset_n = rst_sync[3];
+	assign boot_done  = core_reset_n;
 
-	assign boot_done = rst_sync[2];
+	// ---------------------------------------------------------------- core
+	wire        CLK_VIDEO, CE_PIXEL;
+	wire [12:0] VIDEO_ARX, VIDEO_ARY;
+	wire  [7:0] VGA_R, VGA_G, VGA_B;
+	wire        VGA_HS, VGA_VS, VGA_DE, VGA_F1, VGA_SCALER, VGA_DISABLE;
+	wire  [1:0] VGA_SL;
+	wire        HDMI_FREEZE, HDMI_BLACKOUT, HDMI_BOB_DEINT;
+	wire        LED_U;
+	wire  [1:0] LED_POWER, LED_DISK, BUTTONS;
+	wire [15:0] AUDIO_L, AUDIO_R;
+	wire        AUDIO_S;
+	wire  [1:0] AUDIO_MIX;
+	wire        DDRAM_CLK;
+	wire        DDRAM_BUSY, DDRAM_DOUT_READY;
+	wire [63:0] DDRAM_DOUT, DDRAM_DIN;
+	wire [28:0] DDRAM_ADDR;
+	wire  [7:0] DDRAM_BURSTCNT, DDRAM_BE;
+	wire        DDRAM_RD, DDRAM_WE;
+	wire        SD_SCK, SD_MOSI, SD_CS;
+	wire        UART_RTS, UART_TXD, UART_DTR;
+	wire  [6:0] USER_OUT;
+	wire  [3:0] adc_bus;
+	wire        dram_cs_n;
 
-	// The video clock is the pixel clock: APF samples the DDR converters on it.
+	emu u_core (
+		.CLK_50M          (clk_core),
+		.RESET            (~core_reset_n),
+
+		.clk_74a                    (clk_74a),
+		.bridge_addr                (bridge_addr),
+		.bridge_wr                  (bridge_wr),
+		.bridge_wr_data             (bridge_wr_data),
+		.dataslot_update            (dataslot_update),
+		.dataslot_update_id         (dataslot_update_id),
+		.dataslot_update_size       (dataslot_update_size),
+		.target_dataslot_read       (target_dataslot_read),
+		.target_dataslot_ack        (target_dataslot_ack),
+		.target_dataslot_done       (target_dataslot_done),
+		.target_dataslot_err        (target_dataslot_err),
+		.target_dataslot_id         (target_dataslot_id),
+		.target_dataslot_slotoffset (target_dataslot_slotoffset),
+		.target_dataslot_bridgeaddr (target_dataslot_bridgeaddr),
+		.target_dataslot_length     (target_dataslot_length),
+		.pad_key                    (pad_key),
+		.loader_overflow            (loader_overflow),
+
+		.CLK_VIDEO        (CLK_VIDEO),
+		.CE_PIXEL         (CE_PIXEL),
+		.VIDEO_ARX        (VIDEO_ARX),
+		.VIDEO_ARY        (VIDEO_ARY),
+		.VGA_R            (VGA_R),
+		.VGA_G            (VGA_G),
+		.VGA_B            (VGA_B),
+		.VGA_HS           (VGA_HS),
+		.VGA_VS           (VGA_VS),
+		.VGA_DE           (VGA_DE),
+		.VGA_F1           (VGA_F1),
+		.VGA_SL           (VGA_SL),
+		.VGA_SCALER       (VGA_SCALER),
+		.VGA_DISABLE      (VGA_DISABLE),
+
+		.HDMI_WIDTH       (12'd0),
+		.HDMI_HEIGHT      (12'd0),
+		.HDMI_FREEZE      (HDMI_FREEZE),
+		.HDMI_BLACKOUT    (HDMI_BLACKOUT),
+		.HDMI_BOB_DEINT   (HDMI_BOB_DEINT),
+
+		.LFB_FMT          (6'd0),
+		.LFB_BASE         (32'd0),
+		.LFB_WIDTH        (12'd0),
+		.LFB_HEIGHT       (12'd0),
+		.LFB_STRIDE       (14'd0),
+
+		.LED_USER         (LED_U),
+		.LED_POWER        (LED_POWER),
+		.LED_DISK         (LED_DISK),
+		.BUTTONS          (BUTTONS),
+
+		.CLK_AUDIO        (clk_core),
+		.AUDIO_L          (AUDIO_L),
+		.AUDIO_R          (AUDIO_R),
+		.AUDIO_S          (AUDIO_S),
+		.AUDIO_MIX        (AUDIO_MIX),
+
+		.ADC_BUS          (adc_bus),
+
+		.SD_SCK           (SD_SCK),
+		.SD_MOSI          (SD_MOSI),
+		.SD_MISO          (1'b1),
+		.SD_CS            (SD_CS),
+		.SD_CD            (1'b1),
+
+		// No DDR3 on the Pocket. Answer every beat immediately with 0xFF so the
+		// DCS ROM stream cannot hang; the program it receives is invalid.
+		.DDRAM_CLK        (DDRAM_CLK),
+		.DDRAM_BUSY       (1'b0),
+		.DDRAM_BURSTCNT   (DDRAM_BURSTCNT),
+		.DDRAM_ADDR       (DDRAM_ADDR),
+		.DDRAM_DOUT       (64'hFFFF_FFFF_FFFF_FFFF),
+		.DDRAM_DOUT_READY (1'b1),
+		.DDRAM_RD         (DDRAM_RD),
+		.DDRAM_DIN        (DDRAM_DIN),
+		.DDRAM_BE         (DDRAM_BE),
+		.DDRAM_WE         (DDRAM_WE),
+
+		// The core's SDR SDRAM pins are the Pocket's DRAM bus.
+		.SDRAM_CLK        (dram_clk),
+		.SDRAM_CKE        (dram_cke),
+		.SDRAM_A          (dram_a),
+		.SDRAM_BA         (dram_ba),
+		.SDRAM_DQ         (dram_dq),
+		.SDRAM_DQML       (dram_dqm[0]),
+		.SDRAM_DQMH       (dram_dqm[1]),
+		.SDRAM_nCS        (dram_cs_n),
+		.SDRAM_nCAS       (dram_cas_n),
+		.SDRAM_nRAS       (dram_ras_n),
+		.SDRAM_nWE        (dram_we_n),
+
+		.UART_CTS         (1'b1),
+		.UART_RTS         (UART_RTS),
+		.UART_RXD         (1'b1),
+		.UART_TXD         (UART_TXD),
+		.UART_DTR         (UART_DTR),
+		.UART_DSR         (1'b1),
+		.USER_IN          (7'h7f),
+		.USER_OUT         (USER_OUT),
+		.OSD_STATUS       (1'b0)
+	);
+
+	assign adc_bus   = 4'bzzzz;
+	// apf_top does not expose dram_ncs. Hold chip select asserted; the core's
+	// controller drives CKE and the command lines.
+	assign dram_cs_n = 1'b0;
+
+	// ---------------------------------------------------------------- video to APF
+	// CE_PIXEL is 6.25 MHz (CLK_VIDEO / 8) and clk_pix is 6.25 MHz from the same
+	// PLL, so one register stage is enough: hold the pixel on clk_core at the
+	// CE_PIXEL edge and let apf_top sample it 160 ns later.
+	reg  [23:0] v_rgb = 24'd0;
+	reg         v_de  = 1'b0;
+	reg         v_hs  = 1'b0;
+	reg         v_vs  = 1'b0;
+	always @(posedge clk_core) begin
+		if (CE_PIXEL) begin
+			v_rgb <= {VGA_R, VGA_G, VGA_B};
+			v_de  <= VGA_DE;
+			v_hs  <= VGA_HS;
+			v_vs  <= VGA_VS;
+		end
+	end
+
+	assign video_rgb          = v_rgb;
 	assign video_rgb_clock    = clk_pix;
 	assign video_rgb_clock_90 = clk_pix_90;
-
-	// ---------------------------------------------------------------- video timing
-	// Same module, same counters as MiSTer, run at the pixel clock.
-	wire        ce_pixel;
-	wire [9:0]  h_count, v_count;
-	wire        native_de, native_hs_n, native_vs_n, native_vblank;
-
-	ki_video_timing #(.CLOCK_DIVIDE(1)) u_timing (
-		.clk            (clk_pix),
-		.reset          (core_reset),
-		.ce_pixel       (ce_pixel),
-		.h_count        (h_count),
-		.v_count        (v_count),
-		.display_enable (native_de),
-		.hsync_n        (native_hs_n),
-		.vsync_n        (native_vs_n),
-		.vblank         (native_vblank),
-		.frame_start    (),
-		.vblank_count   (),
-		.vblank_seen    (),
-		.max_v_count    ()
-	);
-
-	// ---------------------------------------------------------------- framebuffer
-	wire        fb_req;
-	wire [27:0] fb_addr;
-	wire  [2:0] fb_words;
-	wire [63:0] fb_data;
-	wire        fb_data_valid;
-	wire        fb_done;
-	wire  [7:0] fb_red, fb_green, fb_blue;
-	wire        fb_pixel_valid;
-
-	ki_framebuffer u_fb (
-		.clk               (clk_pix),
-		.reset             (core_reset),
-		.ce_pixel          (ce_pixel),
-		.h_count           (h_count),
-		.v_count           (v_count),
-		.framebuffer_base  (FB0_LOW[18:0]),
-		.memory_request    (fb_req),
-		.memory_address    (fb_addr),
-		.memory_words      (fb_words),
-		.memory_data       (fb_data),
-		.memory_data_valid (fb_data_valid),
-		.memory_done       (fb_done),
-		.red               (fb_red),
-		.green             (fb_green),
-		.blue              (fb_blue),
-		.pixel_valid       (fb_pixel_valid)
-	);
-
-	// ---------------------------------------------------------------- framebuffer RAM
-	// Port A: the pattern writer (and, later, the memory bridge's CPU path).
-	// Port B: scanout.
-	wire [15:0] fbram_cpu_q, fbram_vid_q;
-	reg  [15:0] fbram_cpu_addr = 16'd0;
-	reg  [63:0] fbram_cpu_data = 64'd0;
-	reg   [7:0] fbram_cpu_be   = 8'h00;
-	reg         fbram_cpu_we   = 1'b0;
-	reg  [15:0] fbram_vid_addr = 16'd0;
-
-	ki_fb_ram u_fbram (
-		.clock       (clk_pix),
-		.cpu_address (fbram_cpu_addr),
-		.cpu_data    (fbram_cpu_data),
-		.cpu_byteena (fbram_cpu_be),
-		.cpu_wren    (fbram_cpu_we),
-		.cpu_q       (fbram_cpu_q),
-		.vid_address (fbram_vid_addr),
-		.vid_q       (fbram_vid_q)
-	);
-
-	// ---------------------------------------------------------------- scanout adapter
-	// ki_framebuffer asks for runs of qwords at a byte address; the RAM holds the
-	// two framebuffer pages compacted. This is the same mapping as
-	// ki_memory_bridge's fb_index(), for the two pages only.
-	localparam integer FB_BUFFER_WORDS = 19200;
-
-	function automatic [15:0] fb_index(input logic [27:0] byte_address);
-		if (byte_address >= FB1_LOW[27:0])
-			return FB_BUFFER_WORDS[15:0] + ((byte_address - FB1_LOW[27:0]) >> 3);
-		return (byte_address - FB0_LOW[27:0]) >> 3;
-	endfunction
-
-	reg        scan_busy = 1'b0;
-	reg  [2:0] scan_left = 3'd0;
-	reg [63:0] scan_data = 64'd0;
-	reg        scan_valid = 1'b0;
-	reg        scan_done = 1'b0;
-
-	assign fb_data       = scan_data;
-	assign fb_data_valid = scan_valid;
-	assign fb_done       = scan_done;
-
-	always @(posedge clk_pix) begin
-		scan_valid <= 1'b0;
-		scan_done  <= 1'b0;
-		if (core_reset) begin
-			scan_busy  <= 1'b0;
-			scan_left  <= 3'd0;
-			fbram_vid_addr <= 16'd0;
-		end else if (!scan_busy) begin
-			if (fb_req) begin
-				fbram_vid_addr <= fb_index(fb_addr);
-				scan_left      <= fb_words - 3'd1;   // fb_words words in total
-				scan_busy      <= 1'b1;
-			end
-		end else begin
-			// one word per cycle; the RAM's registered address means vid_q is
-			// the word for the address set last cycle
-			scan_data  <= fbram_vid_q;
-			scan_valid <= 1'b1;
-			fbram_vid_addr <= fbram_vid_addr + 16'd1;
-			if (scan_left == 3'd0) begin
-				scan_done <= 1'b1;
-				scan_busy <= 1'b0;
-			end else begin
-				scan_left <= scan_left - 3'd1;
-			end
-		end
-	end
-
-	// ---------------------------------------------------------------- test pattern
-	// Eight vertical colour bars, written once into framebuffer page 0 through
-	// port A. 19200 qwords of four RGB555 pixels each.
-	reg  [14:0] w_count = 15'd0;      // qword index being written, 0 .. 19199
-	reg         w_done  = 1'b0;
-	reg         w_phase = 1'b0;
-
-	function automatic [15:0] bar_colour(input logic [3:0] bar);
-		case (bar)
-			3'd0: return {1'b0, 5'd0,  5'd0,  5'd0 };   // black
-			3'd1: return {1'b0, 5'd31, 5'd31, 5'd31};   // white
-			3'd2: return {1'b0, 5'd31, 5'd31, 5'd0 };   // yellow
-			3'd3: return {1'b0, 5'd0,  5'd31, 5'd31};   // cyan
-			3'd4: return {1'b0, 5'd31, 5'd0,  5'd31};   // magenta
-			3'd5: return {1'b0, 5'd31, 5'd0,  5'd0 };   // red
-			3'd6: return {1'b0, 5'd0,  5'd31, 5'd0 };   // green
-			default: return {1'b0, 5'd0, 5'd0, 5'd31};  // blue
-		endcase
-	endfunction
-
-	// Pixel colour by horizontal position: 320 pixels / 32 = ten 32-pixel bars,
-	// eight colours repeated. A line is 80 words (320/4), so word[6:0] walks one
-	// line and column = word[6:0]*4 + i.
-	function automatic [15:0] pattern_pixel(input logic [14:0] word, input logic [1:0] i);
-		logic [8:0] col;
-		begin
-			col = {word[6:0], 2'b00} + {7'd0, i};   // 0..319 within the line
-			pattern_pixel = bar_colour({1'b0, col[7:5]});   // col / 32, 0..9, colours repeat every 8
-		end
-	endfunction
-
-	always @(posedge clk_pix) begin
-		fbram_cpu_we <= 1'b0;
-		if (core_reset) begin
-			w_count  <= 15'd0;
-			w_done   <= 1'b0;
-			w_phase  <= 1'b0;
-		end else if (!w_done) begin
-			if (!w_phase) begin
-				// present address + data
-				fbram_cpu_addr <= w_count;
-				fbram_cpu_be   <= 8'hFF;
-				w_phase        <= 1'b1;
-			end else begin
-				fbram_cpu_we   <= 1'b1;
-				w_phase        <= 1'b0;
-				if (w_count == 15'd19199) begin
-					w_done <= 1'b1;
-				end else begin
-					w_count <= w_count + 15'd1;
-				end
-			end
-		end
-	end
-
-	// Four RGB555 pixels per 64-bit word: pixel 0 in [15:0].
-	always @(*) begin
-		fbram_cpu_data = { pattern_pixel(w_count, 2'd3),
-		                   pattern_pixel(w_count, 2'd2),
-		                   pattern_pixel(w_count, 2'd1),
-		                   pattern_pixel(w_count, 2'd0) };
-	end
-
-	assign pattern_done = w_done;
-	assign status_word  = {13'd0, w_done, fb_pixel_valid, boot_done};
-
-	// ---------------------------------------------------------------- video out
-	// ki_framebuffer gives 8:8:8 and an active-pixel strobe. APF wants the same
-	// three signals plus syncs; the syncs are the core's, inverted (it names
-	// them _n and pulses low).
-	assign video_rgb = {fb_red, fb_green, fb_blue};
-	assign video_de   = fb_pixel_valid;
-	assign video_skip = 1'b0;
-	assign video_hs   = ~native_hs_n;
-	assign video_vs   = ~native_vs_n;
+	assign video_de           = v_de;
+	assign video_skip         = 1'b0;
+	assign video_hs           = v_hs;
+	assign video_vs           = v_vs;
 
 	// ---------------------------------------------------------------- audio
-	// Nothing oscillates yet: the DCS engine is not instantiated. Silence, at
-	// 48 kHz, so the I2S path can be checked on hardware.
-	assign clk_audio = clk_core;
-	assign audio_l   = 16'sd0;
-	assign audio_r   = 16'sd0;
+	// The core emits mono 16-bit at 31.25 kHz; sound_i2s resamples to the
+	// Pocket's 48 kHz I2S through its dual-clock FIFO.
+	sound_i2s #(
+		.CHANNEL_WIDTH (16),
+		.SIGNED_INPUT  (1)
+	) isound (
+		.clk_74a    (clk_74a),
+		.clk_audio  (clk_core),
+		.audio_l    ($signed(AUDIO_L)),
+		.audio_r    ($signed(AUDIO_R)),
+		.audio_mclk (audio_mclk),
+		.audio_lrck (audio_lrck),
+		.audio_dac  (audio_dac)
+	);
+
+	// Keep every otherwise-unobserved core output referenced so nothing that
+	// matters is optimised away, as the measurement harness learned to do.
+	wire unused = ^{CLK_VIDEO, VIDEO_ARX, VIDEO_ARY, VGA_F1, VGA_SCALER,
+	                VGA_DISABLE, VGA_SL, HDMI_FREEZE, HDMI_BLACKOUT,
+	                HDMI_BOB_DEINT, LED_U, LED_POWER, LED_DISK, BUTTONS,
+	                AUDIO_S, AUDIO_MIX, DDRAM_CLK, DDRAM_BURSTCNT, DDRAM_ADDR,
+	                DDRAM_RD, DDRAM_DIN, DDRAM_BE, DDRAM_WE, SD_SCK, SD_MOSI,
+	                SD_CS, UART_RTS, UART_TXD, UART_DTR, USER_OUT};
 endmodule
 
 `default_nettype wire

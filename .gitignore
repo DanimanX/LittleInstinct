@@ -21,3 +21,6 @@ roms/*
 !roms/README.md
 *.7z
 src/fpga/c5_pin_model_dump.txt
+src/seed*/
+*.log
+

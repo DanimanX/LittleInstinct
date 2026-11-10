@@ -13,17 +13,41 @@
 
 # ---- core RTL (CPU, DCS, and the KI board logic)
 set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/cpu/mem.qip ]
-set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/cpu/cpu.qip ]
-set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/dcs/dcs.qip ]
+# CPU: upstream's files, minus cpu_FPU.vhd and cpu_FPU_sqrt.vhd, plus the
+# port-identical stub and the copy of cpu.vhd that instantiates it.
+# Listed directly: a nested .qip resolves its paths relative to its own
+# directory and silently drops sources (this project lost dcs_mem that way).
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/functions.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/export.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/dpram.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/divider.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_instrcache.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_cdc_fifo.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_datacache.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_TLB_instr.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_TLB_data.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_mul.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_cop0.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/cpu_pocket.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/cpu_FPU_stub.vhd ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/r4600_64in32_micro.sv ]
+
+# DCS memory subsystem. A nested .qip resolves its paths relative to its own
+# directory, which silently failed here, so the sources are listed directly.
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/dcs/dcs_mem.sv ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/ki_cpu_core.vhd ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_board_pkg.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_board_io.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_ata.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_dcs_audio.sv ]
+# the ADSP, narrowed to the instruction subset the DCS firmware executes
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/adsp2105_pocket.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fast_fill.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fb_ram.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_framebuffer.sv ]
-set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_memory_bridge.sv ]
+# ki_memory_bridge: upstream's, with the framebuffer made switchable so the port
+# can move it off chip (see pocket_rtl/ki_memory_bridge_pocket.sv)
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_memory_bridge_pocket.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_adapter.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_bist.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_burst.sv ]
@@ -35,14 +59,26 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) r
 # core's own video, and cost BRAM. Left out of the Pocket build.
 # set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fps_overlay.sv ]
 # set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_debug_screen.sv ]
-# set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_startup_osd_button.sv ]
+# startup_osd_button is a MiSTer OSD helper (it presses the MiSTer's OSD button
+# after a ROM download). The core instantiates it, so it must be compiled, but on
+# the Pocket it does nothing useful.
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_startup_osd_button.sv ]
 
 # ---- Pocket top (new code, this port)
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_pll.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/pk_io.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_pocket_top.sv ]
+
+# the core itself, as upstream ships it with the shell swapped out
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_core_pocket.sv ]
+# the core's own PLL (50 MHz reference -> clk_core/clk_cpu/SDRAM phases)
+set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/pll.qip ]
 
 # ---- APF core top (core/): template parts, as every openFPGA core uses them
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) core/core_top.v ]
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) core/core_bridge_cmd.v ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) core/sound_i2s.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) core/sync_fifo.sv ]
+
+# timing constraints for the Pocket hierarchy (adapted from upstream's)
+set_global_assignment -name SDC_FILE [file join $::quartus(qip_path) pocket_rtl/pocket_ki.sdc ]

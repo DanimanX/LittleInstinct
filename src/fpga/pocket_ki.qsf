@@ -738,16 +738,6 @@ set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to bridge_spimiso
 set_instance_assignment -name WEAK_PULL_UP_RESISTOR ON -to bridge_spimosi
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
 # SDRAM controller (rtl/sdram.sv): registers in the I/O cells, as MiSTer's sys.tcl does for its SDRAM
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_a[*]
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_ba[*]
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_dq[*]
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_dqm[*]
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_we_n
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_ras_n
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_cas_n
-set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_cke
-set_instance_assignment -name FAST_OUTPUT_ENABLE_REGISTER ON -to dram_dq[*]
-set_instance_assignment -name FAST_INPUT_REGISTER ON -to dram_dq[*]
 set_instance_assignment -name FAST_INPUT_REGISTER ON -to cram0_dq[*]
 set_instance_assignment -name FAST_INPUT_REGISTER ON -to cram1_dq[*]
 set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to *|SDRAM_*
@@ -768,3 +758,46 @@ set_global_assignment -name QIP_FILE ki_pocket.qip
 set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL
 set_global_assignment -name SEED 1
 
+set_global_assignment -name VERILOG_MACRO "KI_FB_OFFCHIP=1"
+
+# The SDRAM controller clock and its capture clock must be GLOBAL. Upstream's
+# QSF explains why for MiSTer: a regional network reaches one quadrant, and the
+# SDRAM DQ pins are spread across banks, so the I/O registers cannot pack and
+# the capture path fails. Same device family, same reason.
+set_instance_assignment -name GLOBAL_SIGNAL "GLOBAL CLOCK" -to "ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk"
+set_instance_assignment -name GLOBAL_SIGNAL "GLOBAL CLOCK" -to "ic|iki|u_core|pll|pll_inst|altera_pll_i|general[5].gpll~PLL_OUTPUT_COUNTER|divclk"
+set_instance_assignment -name GLOBAL_SIGNAL "GLOBAL CLOCK" -to "ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk"
+# registers in the I/O cells for the DRAM pins
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_a[*]
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_ba[*]
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_dqm[*]
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_clk
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_cke
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_ras_n
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_cas_n
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_we_n
+set_instance_assignment -name FAST_OUTPUT_REGISTER ON -to dram_dq[*]
+set_instance_assignment -name FAST_OUTPUT_ENABLE_REGISTER ON -to dram_dq[*]
+set_instance_assignment -name FAST_INPUT_REGISTER ON -to dram_dq[*]
+set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to *dram_*
+
+# ---------------------------------------------------------------------------------------------------------------
+# Timing-directed physical synthesis, from upstream's QSF, but WITHOUT its
+# AGGRESSIVE PERFORMANCE mode: measured, that mode needs 1,874 LABs against the
+# device's 1,848, so it does not fit at all. Area optimisation plus these
+# retiming/pipelining passes is the only combination that both fits and gives the
+# CPU's multiplier a chance at 100 MHz.
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC_FOR_AREA ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
+set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON
+set_global_assignment -name ECO_OPTIMIZE_TIMING ON
+set_global_assignment -name ALLOW_POWER_UP_DONT_CARE ON
+
+# The core runs from its own PLL, whose reference is the same clk_core the APF
+# bridge would otherwise be timed against. Declaring the APF/memory domains
+# asynchronous to each other removes the enormous false analysis done per build
+# (the two big '?' Fmax entries at 79 MHz). The crossings themselves are handled
+# in RTL (dcfifo in pk_io, two-flop synchronisers in ki_pocket_top).
