@@ -88,7 +88,7 @@ module pk_io #(
 	output reg         sd_buff_wr = 1'b0,
 	output reg         img_mounted = 1'b0,
 	output wire        img_readonly,
-	output reg  [63:0] img_size = 64'd0,
+	output reg  [63:0] img_size = 64'd131076608,
 
 	output wire        overflow            // sticky: a bridge write found the FIFO full
 );
@@ -101,14 +101,14 @@ module pk_io #(
 	wire        rom_win_hit  = (bridge_addr < {5'd0, ROM_BYTES_27});
 	wire        disk_win_hit = (bridge_addr[31:14] == DISK_BRIDGE_BASE[31:14]);
 	wire        fifo_wr      = bridge_wr && (rom_win_hit || disk_win_hit);
-	wire [33:0] fifo_din     = {disk_win_hit, bridge_addr[12:2], bridge_wr_data};
+	wire [43:0] fifo_din     = {disk_win_hit, bridge_addr[12:2], bridge_wr_data};
 
 	wire        fifo_full;
 	reg         overflow_r = 1'b0;
 	always @(posedge clk_74a) if (fifo_wr && fifo_full) overflow_r <= 1'b1;
 	assign overflow = overflow_r;
 
-	wire [33:0] fifo_dout;
+	wire [43:0] fifo_dout;
 	wire        fifo_empty;
 	reg         fifo_rd = 1'b0;
 
@@ -117,7 +117,7 @@ module pk_io #(
 		.lpm_numwords(1024),
 		.lpm_showahead("OFF"),
 		.lpm_type("dcfifo"),
-		.lpm_width(34),
+		.lpm_width(44),
 		.lpm_widthu(10),
 		.overflow_checking("ON"),
 		.underflow_checking("OFF"),
@@ -140,7 +140,7 @@ module pk_io #(
 	                 S_DISK_LO = 3'd6, S_DISK_HI = 3'd7;
 
 	reg [2:0]  st = S_SEL;
-	reg [33:0] held = 34'd0;
+	reg [43:0] held = 44'd0;
 	reg [26:0] wr_addr = 27'd0;      // ioctl_addr for the image, in bytes
 
 	// Disk mount & Target Command CDC
@@ -286,18 +286,18 @@ module pk_io #(
 			end
 			S_DISK_LO: begin
 				held         <= fifo_dout;
-				sd_buff_addr <= {fifo_dout[32:22], 1'b0};
+				sd_buff_addr <= {fifo_dout[42:32], 1'b0};
 				sd_buff_dout <= fifo_dout[15:0];
-				sd_buff_wr   <= fifo_dout[33];
-				if (fifo_dout[33] && (disk_words_rem != 13'd0))
+				sd_buff_wr   <= fifo_dout[43];
+				if (fifo_dout[43] && (disk_words_rem != 13'd0))
 					disk_words_rem <= disk_words_rem - 13'd1;
 				st           <= S_DISK_HI;
 			end
 			S_DISK_HI: begin
-				sd_buff_addr <= {held[32:22], 1'b1};
+				sd_buff_addr <= {held[42:32], 1'b1};
 				sd_buff_dout <= held[31:16];
-				sd_buff_wr   <= held[33];
-				if (held[33] && (disk_words_rem != 13'd0))
+				sd_buff_wr   <= held[43];
+				if (held[43] && (disk_words_rem != 13'd0))
 					disk_words_rem <= disk_words_rem - 13'd1;
 				st           <= S_DONE;
 			end

@@ -314,7 +314,25 @@ Registro de errores de inicialización del framework APF detectados en hardware 
   - En `ki_core_pocket.sv`, conectado `.apf_reset_n(pll_locked)` para que la FIFO y la FSM de descarga operen y graben en la SDRAM durante la fase de carga previa a la liberación del reset.
   - En `ki_memory_bridge_pocket.sv`, priorizada la escritura de descarga a la SDRAM (`download_count != 0`) por encima del escaneo de video en estado `IDLE`.
 
-### 6. Instrucciones para recompilar en PC con Linux y Quartus Prime
+### 6. Pantalla congelada en color lila/morado (Truncamiento en FIFO de Cruce de Reloj ATA y Handshake de Disco)
+- **Síntoma:** Al seleccionar el juego, la barra inferior de carga se completa al 100%, la CPU arranca y ejecuta con éxito el POST (llenando la pantalla verticalmente en color lila/morado durante el auto-test de memoria), pero se queda congelada al final del test sin iniciar la atracción ni reproducir el sonido de inicio.
+- **Causa raíz en RTL ([`pk_io.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/pk_io.sv)):**
+  - Al finalizar el POST de RAM, la CPU transfiere el control a leer el sector 0 del disco duro (`kinst.img`) a través del controlador IDE/ATA (`ki_ata.sv` $\leftrightarrow$ `pk_io.sv` $\leftrightarrow$ APF target dataslot read `0x0180`).
+  - La señal `fifo_din` hacia la FIFO de cruce de reloj APF (`clk_74a`) a Core (`clk_core`) empaquetaba:
+    `{disk_win_hit (1b), bridge_addr[12:2] (11b), bridge_wr_data (32b)}` = **44 bits**.
+  - Sin embargo, `fifo_din` y la macro `dcfifo` estaban tipadas con un ancho de solo **34 bits** (`[33:0]`).
+  - Debido a este truncamiento silencioso de 10 bits por parte del sintetizador:
+    - El bit 33 de la FIFO (`fifo_dout[33]`), que debía ser `disk_win_hit`, recibía en realidad `bridge_addr[3]`.
+    - La señal de habilitación de escritura en el buffer de sectores ATA (`sd_buff_wr`) solo se activaba de manera intermitente cuando `bridge_addr[3] == 1`.
+    - La cuenta regresiva de palabras pendientes (`disk_words_rem`) nunca llegaba a cero.
+    - Como consecuencia, `sd_ack` nunca caía a `0`, produciendo un deadlock: `ki_ata.sv` se quedaba esperando indefinidamente la confirmación de la transferencia y la CPU colgaba en un bucle esperando los datos del disco.
+  - Adicionalmente, `img_size` se inicializaba en `0`, dependiendo exclusivamente de que la Pocket enviara el comando host `0x008A` a tiempo.
+- **Solución RTL aplicada:**
+  - Ampliado el ancho de la FIFO de puente a **44 bits** (`lpm_width(44)`), `fifo_din[43:0]`, `fifo_dout[43:0]` y `held[43:0]`.
+  - Direccionamiento corregido en `S_DISK_LO` (`{fifo_dout[42:32], 1'b0}`) y `S_DISK_HI` (`{held[42:32], 1'b1}`) con habilitador `sd_buff_wr <= fifo_dout[43]`.
+  - Establecido el tamaño por defecto de `img_size = 64'd131076608` (tamaño exacto de `kinst.img`), garantizando que `image_ready` esté activo desde el ciclo 0 incluso si el host retarda el mensaje `0x008A`.
+
+### 7. Instrucciones para recompilar en PC con Linux y Quartus Prime
 
 Para generar el nuevo bitstream con la corrección RTL:
 
