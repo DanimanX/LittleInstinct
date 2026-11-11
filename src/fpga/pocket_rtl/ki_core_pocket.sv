@@ -721,8 +721,8 @@ wire [7:0] debug_ata_error;
 wire debug_ata_image_ready;
 wire [31:0] debug_ata_info;
 
-// Disable debug status overlay on Cyclone V 5CEBA4 to fit full 64-bit R4600 datapath.
-localparam DEBUG_BUILD = 0;
+// Enable debug status overlay on Cyclone V 5CEBA4 to report live CPU PC, RET, ERR on Pocket screen.
+localparam DEBUG_BUILD = 1;
 localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
