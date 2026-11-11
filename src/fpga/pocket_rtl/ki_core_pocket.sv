@@ -1611,17 +1611,23 @@ always @(*) begin
 	green = 8'h00;
 	blue = 8'h00;
 	if(VGA_DE) begin
-		// Game or Debug. Automatically shows KI DEBUG V158 until the CPU
-		// begins drawing the boot screen into the framebuffer, or whenever
-		// the user holds START + SELECT on the Pocket.
-		if(!DEBUG_BUILD || !show_debug) begin
-			red = framebuffer_red;
-			green = framebuffer_green;
-			blue = framebuffer_blue;
-		end else begin
-			red = debug_red;
+		// Game or Debug. Automatically shows KI DEBUG V158 (if enabled)
+		// until the CPU begins drawing the boot screen into the framebuffer,
+		// or whenever the user holds START + SELECT on the Pocket.
+		// When debug overlay is disabled, mute video to clean solid black
+		// until the CPU writes its first frame, preventing startup SDRAM snow.
+		if(DEBUG_BUILD && show_debug) begin
+			red   = debug_red;
 			green = debug_green;
-			blue = debug_blue;
+			blue  = debug_blue;
+		end else if(!fb_write_seen) begin
+			red   = 8'h00;
+			green = 8'h00;
+			blue  = 8'h00;
+		end else begin
+			red   = framebuffer_red;
+			green = framebuffer_green;
+			blue  = framebuffer_blue;
 		end
 
 		if(status[3] && fps_box_pixel) begin

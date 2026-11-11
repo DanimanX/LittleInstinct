@@ -789,7 +789,8 @@ set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to *dram_*
 # CPU's multiplier a chance at 100 MHz.
 set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_DUPLICATION ON
-set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING ON
+set_global_assignment -name PHYSICAL_SYNTHESIS_REGISTER_RETIMING OFF
+set_global_assignment -name PLACEMENT_EFFORT_MULTIPLIER 10.0
 set_global_assignment -name PHYSICAL_SYNTHESIS_COMBO_LOGIC_FOR_AREA ON
 set_global_assignment -name PHYSICAL_SYNTHESIS_ASYNCHRONOUS_SIGNAL_PIPELINING ON
 set_global_assignment -name REMOVE_REDUNDANT_LOGIC_CELLS ON

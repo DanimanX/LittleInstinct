@@ -19,7 +19,7 @@
 // The external port serves the ROMs packed back to back as a 4 MiB image. ADSP
 // program and data memories are local to adsp2105.sv.
 module dcs_mem #(
-    parameter PF_LINES = 128            // 8-byte cache lines; must be a power of two
+    parameter PF_LINES = 512            // 8-byte cache lines; must be a power of two
 ) (
     input  wire        clk,
     input  wire        rst,         // invalidate cache on board/core reset
