@@ -7,9 +7,15 @@
 # The reasoning in upstream's file applies unchanged and is not repeated; what
 # matters is which constraints are load-bearing:
 #
-#   * clk_cpu (PLL out 1, 100 MHz) and clk_core (out 0, 50 MHz) are RELATED at a
-#     2:1 ratio on purpose. The CPU-to-bridge crossing runs unsynchronised under
-#     SYNC_CROSSING and MUST be timed. Do not make them asynchronous.
+#   * clk_core (PLL out 0, 50 MHz) and clk_cpu (out 1, ALSO 50 MHz) are two
+#     outputs of one PLL that are NOT phase aligned - out 1 carries a 250 ps
+#     offset. Quartus therefore pairs a clk_core launch edge with a clk_cpu
+#     latch edge 0.25 ns later and gives every crossing ~12 ns of budget
+#     instead of 20, which is how the CPU's response FIFO came to fail setup
+#     by -6.5 ns. The crossing is an asynchronous CDC and is declared as one
+#     below; the CPU runs it through its two-flop synchronisers
+#     (SYNC_CROSSING = 0 in ki_core_pocket.sv). Do not "fix" the phase by
+#     making these clocks related again.
 #   * clk_cpu is asynchronous to the SDRAM pin clock (out 3); declare that, or
 #     every unrelated path across them is timed as if it had to meet 10 ns.
 #   * clk_core -> clk_sdram_ctl (out 4) is a 2-clock window (upstream line 116).
@@ -22,6 +28,16 @@ derive_clock_uncertainty
 # Tcl variable and use it inside {...}: braces suppress substitution, the
 # collections come back empty, and Quartus ignores the constraint with only a
 # warning (this cost a build cycle - the slack did not move a thousandth).
+
+# ---- CPU clock asynchronous to clk_core -------------------------------------
+# Both are 50 MHz, but out 1 is phase-shifted 250 ps from out 0. Treating them
+# as related asks for the data to land within that 250 ps window, which no
+# register-to-register path can do; the CPU's return FIFO failed by -6.5 ns and
+# the boot ROM hung on its first cached read. They cross through synchronisers,
+# so they are separate asynchronous groups.
+set_clock_groups -asynchronous \
+  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk}] \
+  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}]
 
 # ---- CPU asynchronous to the SDRAM pin clock ---------------------------------
 set_clock_groups -asynchronous \
@@ -46,21 +62,6 @@ set_output_delay -clock KI_SDRAM_CLK -max 1.5 \
   [get_ports {dram_a[*] dram_ba[*] dram_dqm[*] dram_cke dram_ras_n dram_cas_n dram_we_n}]
 set_output_delay -clock KI_SDRAM_CLK -min -0.8 \
   [get_ports {dram_a[*] dram_ba[*] dram_dqm[*] dram_cke dram_ras_n dram_cas_n dram_we_n}]
-
-# ---- the CPU's fast-fill port into the SDRAM controller --------------------
-# ki_sdram_burst's header says these inputs "come from the CPU's clock and have
-# two controller clocks to settle". On MiSTer that needed no constraint of its
-# own because Quartus MERGES clk_cpu (out 1) and clk_ddr (out 2), which are
-# configured identically, so the general[0]->general[4] multicycle below covered
-# it. Here they do not merge: out 0 is 50 MHz and out 1 is 100 MHz, so the
-# fast_line_r / fast_tog path is a genuine clk_cpu -> clk_sdram_ctl crossing and
-# must be given its own window or it fails by ~9 ns (measured).
-set_multicycle_path -setup -end \
-  -from [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -to   [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] 2
-set_multicycle_path -hold -end \
-  -from [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -to   [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] 1
 
 # ---- two-clock windows between the core and the SDRAM controller ------------
 set_multicycle_path -setup -end \

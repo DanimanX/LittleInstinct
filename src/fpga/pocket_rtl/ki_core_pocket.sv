@@ -205,10 +205,13 @@ wire sd_buff_wr;
 //
 //   wire              PLL out   freq     phase   purpose
 //   clk_core          0         50 MHz   0       video, I/O, bridge, debug
-//   clk_cpu           1         100 MHz  0       the MIPS core. RELATED to
-//                                                clk_core at 2:1 and timed
-//                                                against it (SYNC_CROSSING);
-//                                                see KillerInstinct.sdc.
+//   clk_cpu           1         50 MHz   250 ps  the MIPS core. Same rate as
+//                                                clk_core but NOT phase
+//                                                aligned, so the crossing is
+//                                                an asynchronous CDC and runs
+//                                                through synchronisers
+//                                                (SYNC_CROSSING = 0); see
+//                                                pocket_ki.sdc.
 //   clk_ddr           2         100 MHz  0       DDRAM_CLK and the bridge's
 //                                                DDR side
 //   clk_sdram_pin     3         100 MHz  6750ps  leaves the chip as SDRAM_CLK
@@ -583,7 +586,7 @@ ki_pause pause_control
 	.reset(cpu_reset),
 	.osd_open(OSD_STATUS),
 	.osd_pause(status[8]),
-	.button(keyboard_pause | joystick_0[14] | joystick_1[14]),
+	.button(1'b0),
 	.pause(core_pause)
 );
 
@@ -1095,6 +1098,13 @@ wire        controller_fast_valid;
 
 ki_cpu_core #(
 	.DEBUG_TRACE(DEBUG_TRACE),
+	// clk_cpu and clk_core are both 50 MHz out of one PLL (see pll_0002.v), not
+	// the 100:50 of the MiSTer build SYNC_CROSSING was written for. The
+	// crossing must therefore go back through its two-flop synchronisers:
+	// reading the other domain's raw register across a 250 ps offset lost
+	// responses in the return FIFO, and the boot ROM's cache-flush lw at
+	// 0xBFC00400 never saw its mem_done. That is the black screen.
+	.SYNC_CROSSING(0),
 	.DCACHE_FB_PARTIAL(0),
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
@@ -1604,18 +1614,18 @@ end else begin : g_no_overlays
 	assign debug_blue      = 8'h00;
 end endgenerate
 
-reg debug_overlay_enable = 1'b1;
+reg debug_overlay_manual = 1'b0;
 reg [1:0] dbg_toggle_d = 2'b00;
 wire dbg_toggle_press = (joystick_0[14] && joystick_0[15]) || (joystick_0[8] && joystick_0[9]) || (joystick_0[10] && joystick_0[11]);
 
 always @(posedge clk_core) begin
 	dbg_toggle_d <= {dbg_toggle_d[0], dbg_toggle_press};
 	if (dbg_toggle_d == 2'b01) begin
-		debug_overlay_enable <= ~debug_overlay_enable;
+		debug_overlay_manual <= ~debug_overlay_manual;
 	end
 end
 
-wire show_debug = debug_overlay_enable || (|cpu_errors) || status[4];
+wire show_debug = (!fb_write_seen) || debug_overlay_manual || (|cpu_errors) || status[4];
 
 reg [7:0] red;
 reg [7:0] green;
@@ -1625,7 +1635,7 @@ always @(*) begin
 	green = 8'h00;
 	blue = 8'h00;
 	if(VGA_DE) begin
-		// Game or Debug. Automatically shows KI DEBUG V158 (if enabled)
+		// Game or Debug. Automatically shows KI DEBUG V159 (if enabled)
 		// until the CPU begins drawing the boot screen into the framebuffer,
 		// or whenever the user holds START + SELECT on the Pocket.
 		// When debug overlay is disabled, mute video to clean solid black
