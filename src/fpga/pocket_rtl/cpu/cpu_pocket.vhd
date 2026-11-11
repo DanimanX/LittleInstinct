@@ -3033,6 +3033,21 @@ begin
 --##############################################################
 --############################### register file
 --##############################################################
+   iregisterfile1 : entity mem.RamMLAB
+	GENERIC MAP 
+   (
+      width                               => 64,
+      widthad                             => 5
+	)
+	PORT MAP (
+      inclock    => clk93,
+      wren       => regs_wren_a,
+      data       => regs_data_a,
+      wraddress  => regs_address_a,
+      rdaddress  => regs1_address_b,
+      q          => regs1_q_b
+	);
+   
    regs_wren_a    <= '1' when (ss_regs_load = '1') else
                      '1' when (ce_93 = '1' and writebackWriteEnable = '1') else 
                      '0';
@@ -3045,77 +3060,21 @@ begin
    
    regs1_address_b <= std_logic_vector(decSource1);
    regs2_address_b <= std_logic_vector(decSource2);
-
-   g_regs_32 : if ADDR32_ONLY generate
-      signal regs1_q_b32 : std_logic_vector(31 downto 0);
-      signal regs2_q_b32 : std_logic_vector(31 downto 0);
-   begin
-      iregisterfile1 : entity mem.RamMLAB
-      GENERIC MAP 
-      (
-         width                               => 32,
-         widthad                             => 5
-      )
-      PORT MAP (
-         inclock    => clk93,
-         wren       => regs_wren_a,
-         data       => regs_data_a(31 downto 0),
-         wraddress  => regs_address_a,
-         rdaddress  => regs1_address_b,
-         q          => regs1_q_b32
-      );
-      regs1_q_b(31 downto 0)  <= regs1_q_b32;
-      regs1_q_b(63 downto 32) <= (others => regs1_q_b32(31));
-
-      iregisterfile2 : entity mem.RamMLAB
-      GENERIC MAP 
-      (
-         width                               => 32,
-         widthad                             => 5
-      )
-      PORT MAP (
-         inclock    => clk93,
-         wren       => regs_wren_a,
-         data       => regs_data_a(31 downto 0),
-         wraddress  => regs_address_a,
-         rdaddress  => regs2_address_b,
-         q          => regs2_q_b32
-      );
-      regs2_q_b(31 downto 0)  <= regs2_q_b32;
-      regs2_q_b(63 downto 32) <= (others => regs2_q_b32(31));
-   end generate g_regs_32;
-
-   g_regs_64 : if not ADDR32_ONLY generate
-      iregisterfile1 : entity mem.RamMLAB
-      GENERIC MAP 
-      (
-         width                               => 64,
-         widthad                             => 5
-      )
-      PORT MAP (
-         inclock    => clk93,
-         wren       => regs_wren_a,
-         data       => regs_data_a,
-         wraddress  => regs_address_a,
-         rdaddress  => regs1_address_b,
-         q          => regs1_q_b
-      );
-
-      iregisterfile2 : entity mem.RamMLAB
-      GENERIC MAP 
-      (
-         width                               => 64,
-         widthad                             => 5
-      )
-      PORT MAP (
-         inclock    => clk93,
-         wren       => regs_wren_a,
-         data       => regs_data_a,
-         wraddress  => regs_address_a,
-         rdaddress  => regs2_address_b,
-         q          => regs2_q_b
-      );
-   end generate g_regs_64;
+   
+   iregisterfile2 : entity mem.RamMLAB
+	GENERIC MAP 
+   (
+      width                               => 64,
+      widthad                             => 5
+	)
+	PORT MAP (
+      inclock    => clk93,
+      wren       => regs_wren_a,
+      data       => regs_data_a,
+      wraddress  => regs_address_a,
+      rdaddress  => regs2_address_b,
+      q          => regs2_q_b
+	);
    
    --iregisterfileSS : entity mem.RamMLAB
 	--GENERIC MAP 
@@ -4302,37 +4261,25 @@ begin
    
    ---------------------- Operand forward ------------------
    
-   -- Forwarding paths optimized for ADDR32_ONLY
-   value1(31 downto 0) <= resultData(31 downto 0)    when (executeForwardValue1   = '1' and resultWriteEnable = '1') else 
-                          writebackData(31 downto 0) when (writebackForwardValue1 = '1') else 
-                          decodeValue1(31 downto 0);
-   value1(63 downto 32) <= (others => resultData(31))    when (ADDR32_ONLY and executeForwardValue1   = '1' and resultWriteEnable = '1') else
-                           (others => writebackData(31)) when (ADDR32_ONLY and writebackForwardValue1 = '1') else
-                           (others => decodeValue1(31))  when ADDR32_ONLY else
-                           resultData(63 downto 32)      when (executeForwardValue1   = '1' and resultWriteEnable = '1') else
-                           writebackData(63 downto 32)   when (writebackForwardValue1 = '1') else
-                           decodeValue1(63 downto 32);
+   value1 <= resultData    when (executeForwardValue1   = '1' and resultWriteEnable = '1') else 
+             writebackData when (writebackForwardValue1 = '1') else 
+             decodeValue1;
    
-   value2(31 downto 0) <= resultData(31 downto 0)    when (executeForwardValue2   = '1' and resultWriteEnable = '1') else 
-                          writebackData(31 downto 0) when (writebackForwardValue2 = '1') else 
-                          decodeValue2(31 downto 0);
-   value2(63 downto 32) <= (others => resultData(31))    when (ADDR32_ONLY and executeForwardValue2   = '1' and resultWriteEnable = '1') else
-                           (others => writebackData(31)) when (ADDR32_ONLY and writebackForwardValue2 = '1') else
-                           (others => decodeValue2(31))  when ADDR32_ONLY else
-                           resultData(63 downto 32)      when (executeForwardValue2   = '1' and resultWriteEnable = '1') else
-                           writebackData(63 downto 32)   when (writebackForwardValue2 = '1') else
-                           decodeValue2(63 downto 32);
+   value2 <= resultData    when (executeForwardValue2   = '1' and resultWriteEnable = '1') else 
+             writebackData when (writebackForwardValue2 = '1') else 
+             decodeValue2;
    
    ---------------------- Adder ------------------
    value2_muxedSigned <= unsigned(resize(signed(decodeImmData), 64)) when (decodeUseImmidateValue2) else value2;
+   calcResult_add     <= value1 + value2_muxedSigned;
    
-   calcResult_add(31 downto 0)  <= value1(31 downto 0) + value2_muxedSigned(31 downto 0);
-   calcResult_add(63 downto 32) <= (others => calcResult_add(31)) when ADDR32_ONLY else
-                                   value1(63 downto 32) + value2_muxedSigned(63 downto 32);
-   
-   calcMemAddr(31 downto 0)     <= value1(31 downto 0) + unsigned(resize(signed(decodeImmData), 32));
-   calcMemAddr(63 downto 32)    <= (others => '0') when ADDR32_ONLY else
-                                   value1(63 downto 32) + unsigned(resize(signed(decodeImmData(15 downto 15)), 32));
+   g_memaddr_32 : if ADDR32_ONLY generate
+      calcMemAddr(31 downto 0)  <= value1(31 downto 0) + unsigned(resize(signed(decodeImmData), 32));
+      calcMemAddr(63 downto 32) <= (others => '0');
+   end generate;
+   g_memaddr_64 : if not ADDR32_ONLY generate
+      calcMemAddr <= value1 + unsigned(resize(signed(decodeImmData), 64));
+   end generate;
    
    ---------------------- Shifter ------------------
    -- multiplex immidiate and register based shift amount, so both types can use the same shifters
@@ -4340,67 +4287,32 @@ begin
                    '0' & value1(4 downto 0) when (decodeShiftAmountType = "01") else
                    value1(5 downto 0);
    
-   g_shift_32 : if ADDR32_ONLY generate
-      signal shiftValue32 : signed(32 downto 0);
-      signal shiftRes32R  : unsigned(31 downto 0);
-      signal shiftRes32L  : unsigned(31 downto 0);
-   begin
-      shiftValue(31 downto 0)  <= signed(value2(31 downto 0));
-      shiftValue(63 downto 32) <= (others => '0');
-      shiftValue(64)           <= '0';
+   -- multiplex high bit of rightshift so arithmetic shift can be reused for logical shift
+   shiftValue(31 downto 0)  <= signed(value2(31 downto 0));
+   shiftValue(63 downto 32) <= (others => '0') when (decodeShift32 = '1') else signed(value2(63 downto 32));
+   shiftValue(64) <= value2(63) when (decodeShiftSigned = '1') else '0';
 
-      shiftValue32(31 downto 0) <= signed(value2(31 downto 0));
-      shiftValue32(32)          <= value2(31) when (decodeShiftSigned = '1') else '0';
-
-      shiftRes32L <= value2(31 downto 0) sll to_integer(executeShamt(4 downto 0));
-      shiftRes32R <= unsigned(shift_right(shiftValue32, to_integer(executeShamt(4 downto 0)))(31 downto 0));
-
-      calcResult_shiftL <= unsigned(resize(signed(shiftRes32L), 64)) when (decodeResult32 = '1') else resize(shiftRes32L, 64);
-      calcResult_shiftR <= unsigned(resize(signed(shiftRes32R), 64)) when (decodeResult32 = '1') else resize(shiftRes32R, 64);
-   end generate;
-
-   g_shift_64 : if not ADDR32_ONLY generate
-      -- multiplex high bit of rightshift so arithmetic shift can be reused for logical shift
-      shiftValue(31 downto 0)  <= signed(value2(31 downto 0));
-      shiftValue(63 downto 32) <= (others => '0') when (decodeShift32 = '1') else signed(value2(63 downto 32));
-      shiftValue(64) <= value2(63) when (decodeShiftSigned = '1') else '0';
-
-      calcResult_shiftL <= value2 sll to_integer(executeShamt);
-      calcResult_shiftR <= resize(unsigned(shift_right(shiftValue,to_integer(executeShamt))), 64);
-   end generate;
+   calcResult_shiftL <= value2 sll to_integer(executeShamt);
+   calcResult_shiftR <= resize(unsigned(shift_right(shiftValue,to_integer(executeShamt))), 64);  
 
    ---------------------- Sub ------------------
-   calcResult_sub(31 downto 0)  <= value1(31 downto 0) - value2(31 downto 0);
-   calcResult_sub(63 downto 32) <= (others => calcResult_sub(31)) when ADDR32_ONLY else
-                                   value1(63 downto 32) - value2(63 downto 32);
+   calcResult_sub    <= value1 - value2;
    
    ---------------------- logical calcs ------------------
    value2_muxedLogical <= x"000000000000" & decodeImmData when (decodeUseImmidateValue2) else value2;
    
-   calcResult_and(31 downto 0)  <= value1(31 downto 0) and value2_muxedLogical(31 downto 0);
-   calcResult_and(63 downto 32) <= (others => '0') when ADDR32_ONLY else value1(63 downto 32) and value2_muxedLogical(63 downto 32);
-
-   calcResult_or(31 downto 0)   <= value1(31 downto 0) or value2_muxedLogical(31 downto 0);
-   calcResult_or(63 downto 32)  <= (others => '0') when ADDR32_ONLY else value1(63 downto 32) or value2_muxedLogical(63 downto 32);
-
-   calcResult_xor(31 downto 0)  <= value1(31 downto 0) xor value2_muxedLogical(31 downto 0);
-   calcResult_xor(63 downto 32) <= (others => '0') when ADDR32_ONLY else value1(63 downto 32) xor value2_muxedLogical(63 downto 32);
-
-   calcResult_nor(31 downto 0)  <= value1(31 downto 0) nor value2(31 downto 0);
-   calcResult_nor(63 downto 32) <= (others => '0') when ADDR32_ONLY else value1(63 downto 32) nor value2(63 downto 32);
+   calcResult_and    <= value1 and value2_muxedLogical;
+   calcResult_or     <= value1 or value2_muxedLogical;
+   calcResult_xor    <= value1 xor value2_muxedLogical;
+   calcResult_nor    <= value1 nor value2;
 
    ---------------------- bit functions ------------------
    
-   calcResult_lesserSigned      <= '1' when (signed(value1(31 downto 0)) < signed(value2(31 downto 0))) else '0' when ADDR32_ONLY else
-                                   '1' when (signed(value1) < signed(value2)) else '0'; 
-   calcResult_lesserUnsigned    <= '1' when (value1(31 downto 0) < value2(31 downto 0)) else '0' when ADDR32_ONLY else
-                                   '1' when (value1 < value2) else '0';    
-   calcResult_lesserIMMSigned   <= '1' when (signed(value1(31 downto 0)) < resize(signed(decodeImmData), 32)) else '0' when ADDR32_ONLY else
-                                   '1' when (signed(value1) < resize(signed(decodeImmData), 64)) else '0'; 
-   calcResult_lesserIMMUnsigned <= '1' when (value1(31 downto 0) < unsigned(resize(signed(decodeImmData), 32))) else '0' when ADDR32_ONLY else
-                                   '1' when (value1 < unsigned(resize(signed(decodeImmData), 64))) else '0'; 
-   calcResult_equal             <= '1' when (signed(value1(31 downto 0)) = resize(signed(decodeImmData), 32)) else '0' when ADDR32_ONLY else
-                                   '1' when (signed(value1) = resize(signed(decodeImmData), 64)) else '0';  
+   calcResult_lesserSigned      <= '1' when (signed(value1) < signed(value2)) else '0'; 
+   calcResult_lesserUnsigned    <= '1' when (value1 < value2) else '0';    
+   calcResult_lesserIMMSigned   <= '1' when (signed(value1) < resize(signed(decodeImmData), 64)) else '0'; 
+   calcResult_lesserIMMUnsigned <= '1' when (value1 < unsigned(resize(signed(decodeImmData), 64))) else '0'; 
+   calcResult_equal             <= '1' when (signed(value1) = resize(signed(decodeImmData), 64)) else '0'; 
    
    calcResult_bit(63 downto 1) <= (others => '0');
    calcResult_bit(0) <= calcResult_lesserSigned       when (decodeBitFuncType = BITFUNC_SIGNED) else
@@ -4416,13 +4328,9 @@ begin
    PCnext       <= PC(63 downto 29) & (PC(28 downto 0) + 4);
    PCnextBranch <= pcOld0(63 downto 29) & (pcOld0(28 downto 0) + unsigned((resize(signed(decodeImmData), 27) & "00")));
    
-   -- In 32-bit mode (KI arcade runs exclusively in 32-bit KSEG0/KSEG1),
-   -- compare only the low 32 bits to cut 6 levels of 64-bit comparator carry logic.
-   cmpEqual    <= '1' when (value1(31 downto 0) = value2(31 downto 0)) else '0' when ADDR32_ONLY else
-                  '1' when (value1 = value2) else '0';
-   cmpNegative <= value1(31) when ADDR32_ONLY else value1(63);
-   cmpZero     <= '1' when (value1(31 downto 0) = 0) else '0' when ADDR32_ONLY else
-                  '1' when (value1 = 0) else '0';
+   cmpEqual    <= '1' when (value1 = value2) else '0';
+   cmpNegative <= value1(63);
+   cmpZero     <= '1' when (value1 = 0) else '0';
    
    -- use two nextaddress/branch paths with 2 tag rams, so different paths can be calculated in parallel to improve timing
    
@@ -4571,41 +4479,23 @@ begin
                          '0';
 
    ---------------------- result muxing ------------------
-   -- In 32-bit execution mode (ADDR32_ONLY / KI arcade), cut the 64-bit mux tree
-   -- and upper-word extension delay into stage 4 operand forwarding.
-   resultDataMuxed(31 downto 0) <= calcResult_shiftL(31 downto 0) when (decodeResultMux = RESULTMUX_SHIFTLEFT)  else
-                                   calcResult_shiftR(31 downto 0) when (decodeResultMux = RESULTMUX_SHIFTRIGHT) else
-                                   calcResult_add(31 downto 0)    when (decodeResultMux = RESULTMUX_ADD)        else
-                                   PCnext(31 downto 0)            when (decodeResultMux = RESULTMUX_PC)         else
-                                   HI(31 downto 0)                when (decodeResultMux = RESULTMUX_HI)         else
-                                   LO(31 downto 0)                when (decodeResultMux = RESULTMUX_LO)         else
-                                   calcResult_sub(31 downto 0)    when (decodeResultMux = RESULTMUX_SUB)        else
-                                   calcResult_and(31 downto 0)    when (decodeResultMux = RESULTMUX_AND)        else
-                                   calcResult_or(31 downto 0)     when (decodeResultMux = RESULTMUX_OR )        else
-                                   calcResult_xor(31 downto 0)    when (decodeResultMux = RESULTMUX_XOR)        else
-                                   calcResult_nor(31 downto 0)    when (decodeResultMux = RESULTMUX_NOR)        else
-                                   calcResult_bit(31 downto 0)    when (decodeResultMux = RESULTMUX_BIT)        else
-                                   FPU_TransferData(31 downto 0)  when (decodeResultMux = RESULTMUX_FPU)        else
-                                   unsigned(decodeImmData) & x"0000"; -- (decodeResultMux = RESULTMUX_LUI);
-
-   resultDataMuxed(63 downto 32) <= (others => '0') when ADDR32_ONLY else
-                                    calcResult_shiftL(63 downto 32) when (decodeResultMux = RESULTMUX_SHIFTLEFT)  else
-                                    calcResult_shiftR(63 downto 32) when (decodeResultMux = RESULTMUX_SHIFTRIGHT) else
-                                    calcResult_add(63 downto 32)    when (decodeResultMux = RESULTMUX_ADD)        else
-                                    PCnext(63 downto 32)            when (decodeResultMux = RESULTMUX_PC)         else
-                                    HI(63 downto 32)                when (decodeResultMux = RESULTMUX_HI)         else
-                                    LO(63 downto 32)                when (decodeResultMux = RESULTMUX_LO)         else
-                                    calcResult_sub(63 downto 32)    when (decodeResultMux = RESULTMUX_SUB)        else
-                                    calcResult_and(63 downto 32)    when (decodeResultMux = RESULTMUX_AND)        else
-                                    calcResult_or(63 downto 32)     when (decodeResultMux = RESULTMUX_OR )        else
-                                    calcResult_xor(63 downto 32)    when (decodeResultMux = RESULTMUX_XOR)        else
-                                    calcResult_nor(63 downto 32)    when (decodeResultMux = RESULTMUX_NOR)        else
-                                    calcResult_bit(63 downto 32)    when (decodeResultMux = RESULTMUX_BIT)        else
-                                    FPU_TransferData(63 downto 32)  when (decodeResultMux = RESULTMUX_FPU)        else
-                                    (others => decodeImmData(15)); -- sign-extended LUI for 64-bit mode
-                       
+   resultDataMuxed <= calcResult_shiftL when (decodeResultMux = RESULTMUX_SHIFTLEFT)  else
+                      calcResult_shiftR when (decodeResultMux = RESULTMUX_SHIFTRIGHT) else
+                      calcResult_add    when (decodeResultMux = RESULTMUX_ADD)        else
+                      PCnext            when (decodeResultMux = RESULTMUX_PC)         else
+                      HI                when (decodeResultMux = RESULTMUX_HI)         else
+                      LO                when (decodeResultMux = RESULTMUX_LO)         else
+                      calcResult_sub    when (decodeResultMux = RESULTMUX_SUB)        else
+                      calcResult_and    when (decodeResultMux = RESULTMUX_AND)        else
+                      calcResult_or     when (decodeResultMux = RESULTMUX_OR )        else
+                      calcResult_xor    when (decodeResultMux = RESULTMUX_XOR)        else
+                      calcResult_nor    when (decodeResultMux = RESULTMUX_NOR)        else
+                      calcResult_bit    when (decodeResultMux = RESULTMUX_BIT)        else
+                      FPU_TransferData  when (decodeResultMux = RESULTMUX_FPU)        else
+                      unsigned(resize(signed(decodeImmData) & x"0000", 64)); -- (decodeResultMux = RESULTMUX_LUI);
+                      
    resultDataMuxed64(31 downto 0) <= resultDataMuxed(31 downto 0);
-   resultDataMuxed64(63 downto 32) <= (others => resultDataMuxed(31)) when (ADDR32_ONLY or (decodeResult32 = '1')) else resultDataMuxed(63 downto 32);
+   resultDataMuxed64(63 downto 32) <= (others => resultDataMuxed(31)) when decodeResult32 else resultDataMuxed(63 downto 32);
 
    ---------------------- exceptions ------------------
    exceptionCode_3  <= decodeExcCode;
@@ -4615,8 +4505,8 @@ begin
                       '1' when (decodeExcType = EXCTYPE_ADDRW   and calcMemAddr(1 downto 0) > 0) else
                       '1' when (decodeExcType = EXCTYPE_ADDRD   and calcMemAddr(2 downto 0) > 0) else
                       -- 2 below should use calcMemAddr to allow inter cycle wraparound, but we can't do that due to timing closure
-                      '1' when (region64 = '0' and value1(63 downto 32) = x"FFFFFFFF" and value1(31) = '0') else 
-                      '1' when (region64 = '0' and value1(63 downto 32) = x"00000000" and value1(31) = '1') else
+                      '1' when (not ADDR32_ONLY and region64 = '0' and value1(63 downto 32) = x"FFFFFFFF" and value1(31) = '0') else 
+                      '1' when (not ADDR32_ONLY and region64 = '0' and value1(63 downto 32) = x"00000000" and value1(31) = '1') else
                       '1' when (region_unused = '1') else
                       '0';
    

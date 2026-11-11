@@ -721,9 +721,8 @@ wire [7:0] debug_ata_error;
 wire debug_ata_image_ready;
 wire [31:0] debug_ata_info;
 
-// Enable Page-0 status overlay (KI DEBUG V158) while keeping DEBUG_TRACE=0
-// and ki_sdram_bist disabled so Fmax and ALM usage remain optimal.
-localparam DEBUG_BUILD = 1;
+// Disable debug status overlay on Cyclone V 5CEBA4 to fit full 64-bit R4600 datapath.
+localparam DEBUG_BUILD = 0;
 localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
@@ -1602,7 +1601,7 @@ end else begin : g_no_overlays
 	assign debug_blue      = 8'h00;
 end endgenerate
 
-wire show_debug = (!fb_write_seen) || (joystick_0[10] && joystick_0[11]) || status[4];
+wire show_debug = (!fb_write_seen) || (|cpu_errors) || (joystick_0[10] && joystick_0[11]) || status[4];
 
 reg [7:0] red;
 reg [7:0] green;
