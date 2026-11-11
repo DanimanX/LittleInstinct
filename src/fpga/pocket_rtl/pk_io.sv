@@ -200,15 +200,12 @@ module pk_io #(
 	reg [23:0] tcmd_timeout = 24'd0;
 
 	// APF interact.json action write (0xF0000000 = Reset Core)
-	reg [7:0] menu_reset_timer_74a = 8'd0;
+	reg menu_reset_tog_74a = 1'b0;
 	always @(posedge clk_74a) begin
 		if (bridge_wr && (bridge_addr == 32'hF0000000)) begin
-			menu_reset_timer_74a <= 8'hFF;
-		end else if (menu_reset_timer_74a != 8'd0) begin
-			menu_reset_timer_74a <= menu_reset_timer_74a - 8'd1;
+			menu_reset_tog_74a <= ~menu_reset_tog_74a;
 		end
 	end
-	wire menu_reset_74a = (menu_reset_timer_74a != 8'd0);
 
 	always @(posedge clk_74a) begin
 		req_sync_74a <= {req_sync_74a[1:0], disk_req_tog};
@@ -263,7 +260,7 @@ module pk_io #(
 			img_mounted <= 1'b1;
 		end
 
-		if (!apf_reset_n || reset_req) begin
+		if (!apf_reset_n) begin
 			st             <= S_SEL;
 			ioctl_download <= 1'b0;
 			ioctl_addr     <= 27'd0;
@@ -274,6 +271,14 @@ module pk_io #(
 			disk_is_write  <= 1'b0;
 			img_size       <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
 			img_mounted    <= 1'b0;
+		end else if (core_menu_reset) begin
+			// On menu soft-reset, DO NOT re-enter S_SEL or re-assert ioctl_download:
+			// APF only streams the boot ROM once on initial core launch.
+			// Re-entering S_SEL would stall pk_io in S_WAIT waiting on an empty FIFO.
+			// Keep st unchanged (S_DONE) and cleanly clear any pending ATA activity.
+			sd_ack         <= 1'b0;
+			disk_active    <= 1'b0;
+			disk_is_write  <= 1'b0;
 		end else begin
 			if (img_size < 64'd512) begin
 				img_size <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
@@ -435,8 +440,8 @@ module pk_io #(
 	reg [2:0]  menu_reset_sync = 3'd0;
 	reg [17:0] reset_extender  = 18'd0; // 50,000 cycles = 1ms at 50MHz
 	always @(posedge clk) begin
-		menu_reset_sync <= {menu_reset_sync[1:0], menu_reset_74a};
-		if (menu_reset_sync[2]) begin
+		menu_reset_sync <= {menu_reset_sync[1:0], menu_reset_tog_74a};
+		if (menu_reset_sync[2] != menu_reset_sync[1]) begin
 			reset_extender <= 18'd50000;
 		end else if (reset_extender != 18'd0) begin
 			reset_extender <= reset_extender - 18'd1;
@@ -444,21 +449,7 @@ module pk_io #(
 	end
 	wire core_menu_reset = (reset_extender != 18'd0);
 
-	// Gamepad soft reset: hold Select (pad_key[14]) + Start (pad_key[15]) for ~0.8s
-	reg [24:0] pad_reset_cnt = 25'd0;
-	wire pad_reset_combo = pad_key[14] && pad_key[15];
-	always @(posedge clk) begin
-		if (pad_reset_combo) begin
-			if (!pad_reset_cnt[24])
-				pad_reset_cnt <= pad_reset_cnt + 25'd1;
-		end else begin
-			pad_reset_cnt <= 25'd0;
-		end
-	end
-	wire pad_reset = pad_reset_cnt[24];
-
-	wire reset_req = core_menu_reset | pad_reset;
-	assign buttons = {reset_req, ~apf_reset_n};   // [1] = reset, [0] = apf_reset
+	assign buttons = {core_menu_reset, ~apf_reset_n};   // [1] = reset, [0] = apf_reset
 
 	assign debug_disk_info = {
 		tcmd_st,
