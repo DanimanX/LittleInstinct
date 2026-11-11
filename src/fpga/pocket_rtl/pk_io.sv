@@ -97,6 +97,8 @@ module pk_io #(
 );
 	localparam integer ROM_WORDS = ROM_BYTES / 4;          // bridge words (4 bytes each)
 	localparam [26:0]  ROM_BYTES_27 = ROM_BYTES[26:0];
+	localparam [63:0]  DEFAULT_KI1_SIZE = 64'd131076608;
+	localparam [63:0]  DEFAULT_KI2_SIZE = 64'd457673216;
 
 	// ---------------------------------------------------------------- clk_74a
 	// ROM slot writes: [0, ROM_BYTES).
@@ -170,7 +172,7 @@ module pk_io #(
 
 	// Disk mount & Target Command CDC
 	reg        upd_tog_74a = 1'b0;
-	reg [31:0] upd_size_74a = 32'd0;
+	reg [31:0] upd_size_74a = 32'd131076608;
 	always @(posedge clk_74a) begin
 		if (dataslot_update && (dataslot_update_id == DISK_SLOT_ID)) begin
 			upd_size_74a <= dataslot_update_size;
@@ -243,7 +245,10 @@ module pk_io #(
 		disk_done_sync <= {disk_done_sync[1:0], done_tog_74a};
 
 		if (upd_sync[2] != upd_sync[1]) begin
-			img_size    <= {32'd0, upd_size_74a};
+			if (upd_size_74a >= 32'd512)
+				img_size <= {32'd0, upd_size_74a};
+			else
+				img_size <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
 			img_mounted <= 1'b1;
 		end
 
@@ -256,7 +261,13 @@ module pk_io #(
 			sd_ack         <= 1'b0;
 			disk_active    <= 1'b0;
 			disk_is_write  <= 1'b0;
+			img_size       <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
+			img_mounted    <= 1'b1;
 		end else begin
+			if (img_size < 64'd512) begin
+				img_size    <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
+				img_mounted <= 1'b1;
+			end
 			status <= 128'd0;
 
 			if (disk_active)
