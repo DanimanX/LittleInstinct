@@ -347,10 +347,10 @@ always @(posedge clk) begin
             host_resultcode <= 1; // default: booting
             if(status_boot_done) begin
                 host_resultcode <= 2; // setup
-                if(status_setup_done) begin
-                    host_resultcode <= 3; // idle
-                end else if(status_running) begin
+                if(status_running) begin
                     host_resultcode <= 4; // running
+                end else if(status_setup_done) begin
+                    host_resultcode <= 3; // idle
                 end 
             end
             hstate <= ST_DONE_CODE;

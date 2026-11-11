@@ -96,12 +96,13 @@ module ki_pocket_top (
 	assign pll_locked_o = pll_locked & core_pll_locked;
 
 	// ---------------------------------------------------------------- boot & reset
-	// boot_done notifies core_bridge_cmd (clk_74a domain) that clocks, both PLLs,
-	// and SDRAM power-up initialization are complete and ready for APF Host commands.
-	// It MUST NOT wait for apf_reset_n, because APF only releases reset_n via Host
-	// Command 0x0011 (Reset Exit) AFTER status_boot_done is asserted.
+	// boot_done notifies core_bridge_cmd (clk_74a domain) that clocks and both PLLs
+	// are locked and ready for APF Host commands.
+	// As documented in MIRLO64 and APF specs, waiting on SDRAM readiness here triggers
+	// "Error in framework RS: Host commands ignored". SDRAM readiness is handled
+	// at data slot write time.
 	reg [3:0] boot_sync = 4'd0;
-	always @(posedge clk_74a) boot_sync <= {boot_sync[2:0], (pll_locked & core_pll_locked & core_sdram_ready)};
+	always @(posedge clk_74a) boot_sync <= {boot_sync[2:0], (pll_locked & core_pll_locked)};
 	assign boot_done = boot_sync[3];
 
 	reg [3:0] rst_sync = 4'd0;
