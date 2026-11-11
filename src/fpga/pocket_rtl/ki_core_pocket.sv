@@ -257,6 +257,7 @@ assign core_sdram_ready = sdram_ready;
 
 // Analogue Pocket: the APF bridge feeds the same core-facing ioctl_* bus that
 // MiSTer's hps_io drove. See pocket_rtl/pk_io.sv.
+wire [31:0] debug_disk_info;
 pk_io #(.ROM_BYTES(4718592)) pk_io
 (
 	.clk_74a                    (clk_74a),
@@ -305,7 +306,8 @@ pk_io #(.ROM_BYTES(4718592)) pk_io
 	.img_mounted                (img_mounted),
 	.img_readonly               (img_readonly),
 	.img_size                   (img_size),
-	.overflow                   (loader_overflow)
+	.overflow                   (loader_overflow),
+	.debug_disk_info            (debug_disk_info)
 );
 
 ki_startup_osd_button startup_osd_button_inst
@@ -1572,6 +1574,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.ata_state(debug_ata_state),
 		.ata_status(debug_ata_status),
 		.ata_error(debug_ata_error),
+		.disk_debug_info(debug_disk_info),
 		// Page 1 is the frozen pre-event trace. It is fed from the clk_core
 		// shadow, not from the CPU domain directly, so what is on screen is a
 		// coherent capture rather than a live sample of a 736-bit bus.
@@ -1601,7 +1604,18 @@ end else begin : g_no_overlays
 	assign debug_blue      = 8'h00;
 end endgenerate
 
-wire show_debug = (!fb_write_seen) || (|cpu_errors) || (joystick_0[10] && joystick_0[11]) || status[4];
+reg debug_overlay_enable = 1'b1;
+reg [1:0] dbg_toggle_d = 2'b00;
+wire dbg_toggle_press = (joystick_0[14] && joystick_0[15]) || (joystick_0[8] && joystick_0[9]) || (joystick_0[10] && joystick_0[11]);
+
+always @(posedge clk_core) begin
+	dbg_toggle_d <= {dbg_toggle_d[0], dbg_toggle_press};
+	if (dbg_toggle_d == 2'b01) begin
+		debug_overlay_enable <= ~debug_overlay_enable;
+	end
+end
+
+wire show_debug = debug_overlay_enable || (|cpu_errors) || status[4];
 
 reg [7:0] red;
 reg [7:0] green;

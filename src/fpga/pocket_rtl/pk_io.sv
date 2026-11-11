@@ -92,7 +92,8 @@ module pk_io #(
 	output wire        img_readonly,
 	output reg  [63:0] img_size = 64'd131076608,
 
-	output wire        overflow            // sticky: a bridge write found the FIFO full
+	output wire        overflow,           // sticky: a bridge write found the FIFO full
+	output wire [31:0] debug_disk_info
 );
 	localparam integer ROM_WORDS = ROM_BYTES / 4;          // bridge words (4 bytes each)
 	localparam [26:0]  ROM_BYTES_27 = ROM_BYTES[26:0];
@@ -189,31 +190,46 @@ module pk_io #(
 	assign img_readonly               = 1'b0;
 
 	// clk_74a side of Target Command (0x0180: Data slot read, 0x0184: Data slot write)
-	reg [2:0] req_sync_74a = 3'd0;
-	reg [1:0] wr_sync_74a  = 2'd0;
-	reg       done_tog_74a = 1'b0;
-	reg [1:0] tcmd_st = 2'd0;
+	reg [2:0]  req_sync_74a = 3'd0;
+	reg [1:0]  wr_sync_74a  = 2'd0;
+	reg        done_tog_74a = 1'b0;
+	reg [1:0]  tcmd_st = 2'd0;
+	reg [2:0]  tcmd_err = 3'd0;
+	reg [23:0] tcmd_timeout = 24'd0;
+
 	always @(posedge clk_74a) begin
 		req_sync_74a <= {req_sync_74a[1:0], disk_req_tog};
 		wr_sync_74a  <= {wr_sync_74a[0], disk_is_write};
 		case (tcmd_st)
-		2'd0: if (req_sync_74a[2] != done_tog_74a) begin
-			target_dataslot_read  <= ~wr_sync_74a[1];
-			target_dataslot_write <=  wr_sync_74a[1];
-			tcmd_st               <= 2'd1;
+		2'd0: begin
+			tcmd_timeout <= 24'd0;
+			if (req_sync_74a[2] != done_tog_74a) begin
+				target_dataslot_read  <= ~wr_sync_74a[1];
+				target_dataslot_write <=  wr_sync_74a[1];
+				tcmd_st               <= 2'd1;
+			end
 		end
-		2'd1: if (target_dataslot_ack || !target_dataslot_done) begin
-			target_dataslot_read  <= 1'b0;
-			target_dataslot_write <= 1'b0;
-			tcmd_st               <= 2'd2;
+		2'd1: begin
+			tcmd_timeout <= tcmd_timeout + 24'd1;
+			if (target_dataslot_ack || !target_dataslot_done || tcmd_timeout[22]) begin
+				target_dataslot_read  <= 1'b0;
+				target_dataslot_write <= 1'b0;
+				tcmd_st               <= 2'd2;
+			end
 		end
-		2'd2: if (target_dataslot_done) begin
-			done_tog_74a <= req_sync_74a[2];
-			tcmd_st      <= 2'd0;
+		2'd2: begin
+			tcmd_timeout <= tcmd_timeout + 24'd1;
+			if (target_dataslot_done || tcmd_timeout[23]) begin
+				tcmd_err     <= target_dataslot_err;
+				done_tog_74a <= req_sync_74a[2];
+				tcmd_st      <= 2'd0;
+			end
 		end
 		default: tcmd_st <= 2'd0;
 		endcase
 	end
+
+	reg [23:0] disk_watchdog = 24'd0;
 
 	always @(posedge clk) begin
 		fifo_rd      <= 1'b0;
@@ -242,6 +258,11 @@ module pk_io #(
 			disk_is_write  <= 1'b0;
 		end else begin
 			status <= 128'd0;
+
+			if (disk_active)
+				disk_watchdog <= disk_watchdog + 24'd1;
+			else
+				disk_watchdog <= 24'd0;
 
 			// Start an APF deferred slot read when ki_ata asserts sd_rd
 			if (st == S_DONE && !disk_active && sd_rd) begin
@@ -332,8 +353,8 @@ module pk_io #(
 				if (!fifo_empty) begin
 					fifo_rd <= 1'b1;
 					st      <= S_DISK_RD;
-				end else if (disk_active && (disk_words_rem == 13'd0) &&
-				             (disk_done_sync[2] == disk_req_tog)) begin
+				end else if (disk_active &&
+				             ((disk_done_sync[2] == disk_req_tog) || disk_watchdog[23])) begin
 					sd_ack      <= 1'b0;
 					disk_active <= 1'b0;
 				end
@@ -389,6 +410,20 @@ module pk_io #(
 	assign ps2_key            = 11'd0;
 	assign buttons            = {1'b0, ~apf_reset_n};   // [1] = reset
 	assign forced_scandoubler = 1'b0;
+
+	assign debug_disk_info = {
+		tcmd_st,
+		tcmd_err,
+		target_dataslot_done,
+		target_dataslot_ack,
+		disk_active,
+		sd_rd,
+		sd_ack,
+		fifo_empty,
+		fifo_full,
+		disk_words_rem[11:0],
+		sd_lba[7:0]
+	};
 endmodule
 
 `default_nettype wire

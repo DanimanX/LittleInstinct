@@ -43,6 +43,7 @@ module ki_debug_screen (
   input  wire   [2:0] ata_state,
   input  wire   [7:0] ata_status,
   input  wire   [7:0] ata_error,
+  input  wire  [31:0] disk_debug_info,
 
   // ---------------------------------------------------------------------
   // Page 1: the frozen pre-event execution trace.
@@ -115,7 +116,8 @@ module ki_debug_screen (
         vblank_count,
         ata_state,
         ata_status,
-        ata_error
+        ata_error,
+        disk_debug_info
   });
   logic [SNAPSHOT_BITS-1:0] diagnostic_snapshot = '0;
   logic [54:0] bist_snapshot = 55'd0;
@@ -150,7 +152,8 @@ module ki_debug_screen (
         vblank_count,
         ata_state,
         ata_status,
-        ata_error
+        ata_error,
+        disk_debug_info
       };
       errors_snapshot <= cpu_errors;
       bist_snapshot <= {
@@ -443,6 +446,7 @@ module ki_debug_screen (
     logic  [2:0] d_ata_state;
     logic  [7:0] d_ata_status;
     logic  [7:0] d_ata_error;
+    logic [31:0] d_disk_debug;
     begin
       {
         d_cpu_reset,
@@ -471,7 +475,8 @@ module ki_debug_screen (
         d_vblank_count,
         d_ata_state,
         d_ata_status,
-        d_ata_error
+        d_ata_error,
+        d_disk_debug
       } = data;
       {
         d_bist_unused, d_bist_done, d_bist_pass, d_bist_error_count,
@@ -548,6 +553,11 @@ module ki_debug_screen (
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_ret_pc, column-3);
+          else if (column == 11) screen_char="D";
+          else if (column == 12) screen_char="K";
+          else if (column == 13) screen_char=":";
+          else if (column >= 14 && column <= 19)
+            screen_char=hex32_ascii(d_disk_debug, column-14);
         end
         // EP/AC are the BIST stall decode and only mean anything when the
         // self test FAILED. While it passes, this row carries the retired
