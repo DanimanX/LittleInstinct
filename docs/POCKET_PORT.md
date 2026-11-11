@@ -1,7 +1,15 @@
 # Pocket port: what has been built, and what still does not work
 
 This is the honest status of turning the measurements into a working Pocket core.
-It is **not** working. It builds, it fits, and most of the clock domains close —
+It is **not** working.
+
+> **v1.0.10 update:** the loader now finishes on APF command `0x008F` as well as
+> on the exact byte count, a `ki_boot_ctrl` supervisor resets the loader once
+> and has a timeout/abort fallback, and `tests/sim/` has four Icarus benches
+> including a `pk_io -> bridge -> SDRAM -> boot_loaded` end-to-end test. See
+> README.md section 9 for the new debug-page legend.
+
+It builds, it fits, and most of the clock domains close —
 but the CPU domain does not meet timing, and the two pieces that make the game
 run (the framebuffer in DRAM and the DCS sound ROM) are not implemented.
 

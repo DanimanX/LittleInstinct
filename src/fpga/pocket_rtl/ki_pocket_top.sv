@@ -50,6 +50,11 @@ module ki_pocket_top (
 	// APF pad
 	input  wire [31:0] pad_key,
 
+	// APF Host Command 0x008F: every data slot access is complete. This is
+	// the authoritative end of the ROM stream; the byte count in the slot is
+	// an implementation detail, not a protocol guarantee.
+	input  wire        apf_dataslot_complete,
+
 	// APF video, into apf_top's DDR converters
 	output wire [23:0] video_rgb,
 	output wire        video_rgb_clock,
@@ -155,6 +160,7 @@ module ki_pocket_top (
 		.target_dataslot_length     (target_dataslot_length),
 		.disk_bridge_rd_data        (disk_bridge_rd_data),
 		.pad_key                    (pad_key),
+		.apf_dataslot_complete      (apf_dataslot_complete),
 		.ref_pll_locked             (pll_locked),
 		.core_pll_locked            (core_pll_locked),
 		.core_sdram_ready           (core_sdram_ready),

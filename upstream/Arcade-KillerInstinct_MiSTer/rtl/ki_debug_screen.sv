@@ -85,6 +85,12 @@ module ki_debug_screen (
   input  wire  [15:0] bist_first_bad_expected,
   input  wire  [15:0] bist_first_bad_actual,
 
+  // Boot/loader status, shown on row 1 in place of the video counters: on a
+  // core that is not booting, "is SDRAM out of reset and where is the loader"
+  // is the first question, and the video counters say nothing about it.
+  input  wire   [2:0]  boot_state,
+  input  wire          sdram_ready,
+
   output logic  [7:0] red,
   output logic  [7:0] green,
   output logic  [7:0] blue
@@ -117,7 +123,9 @@ module ki_debug_screen (
         ata_state,
         ata_status,
         ata_error,
-        disk_debug_info
+        disk_debug_info,
+        boot_state,
+        sdram_ready
   });
   logic [SNAPSHOT_BITS-1:0] diagnostic_snapshot = '0;
   logic [54:0] bist_snapshot = 55'd0;
@@ -153,7 +161,9 @@ module ki_debug_screen (
         ata_state,
         ata_status,
         ata_error,
-        disk_debug_info
+        disk_debug_info,
+        boot_state,
+        sdram_ready
       };
       errors_snapshot <= cpu_errors;
       bist_snapshot <= {
@@ -447,6 +457,8 @@ module ki_debug_screen (
     logic  [7:0] d_ata_status;
     logic  [7:0] d_ata_error;
     logic [31:0] d_disk_debug;
+    logic  [2:0] d_boot_state;
+    logic        d_sdram_ready;
     begin
       {
         d_cpu_reset,
@@ -476,7 +488,9 @@ module ki_debug_screen (
         d_ata_state,
         d_ata_status,
         d_ata_error,
-        d_disk_debug
+        d_disk_debug,
+        d_boot_state,
+        d_sdram_ready
       } = data;
       {
         d_bist_unused, d_bist_done, d_bist_pass, d_bist_error_count,
@@ -489,7 +503,7 @@ module ki_debug_screen (
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="5"; 12: screen_char="9";
+          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="2";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -498,12 +512,9 @@ module ki_debug_screen (
           6: screen_char="B"; 7: screen_char="O"; 8: screen_char="O";
           9: screen_char="T"; 10: screen_char=":";
           11: screen_char=8'h30+d_boot_loaded;
-          13: screen_char="V"; 14: screen_char="M"; 15: screen_char=":";
-          16: screen_char=hex_ascii({2'b00, d_video_max_v_count[9:8]});
-          17: screen_char=hex_ascii(d_video_max_v_count[7:4]);
-          18: screen_char=hex_ascii(d_video_max_v_count[3:0]);
-          20: screen_char="V"; 21: screen_char="S"; 22: screen_char=":";
-          23: screen_char=8'h30+d_video_vblank_seen;
+          13: screen_char="S"; 14: screen_char="D"; 15: screen_char=":";
+          16: screen_char=8'h30+d_sdram_ready;
+          18: screen_char="L"; 19: screen_char=hex_ascii({1'b0, d_boot_state});
           default: screen_char=" ";
         endcase
         2: case (column)
@@ -548,8 +559,11 @@ module ki_debug_screen (
             screen_char=hex32_ascii(d_cpu_t2_reload_count, column-12);
         end
         5: begin
-          if (column == 0) screen_char="D";
-          else if (column == 1) screen_char="S";
+          // RX: bytes handed to the ROM loader (pk_io's wr_addr). 0x480000 is
+          // a complete image; anything less when BOOT is still 0 is the size
+          // the loader actually received.
+          if (column == 0) screen_char="R";
+          else if (column == 1) screen_char="X";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_ret_pc, column-3);
@@ -612,20 +626,26 @@ module ki_debug_screen (
           end
         end
         7: begin
-          if (column == 0) screen_char="E";
-          else if (column == 1) screen_char="E";
+          // SB: the DCS sound board's host status latch (adsp2105
+          // latch_control). This row carried the eret flags on MiSTer, where
+          // the CPU exported them; the Pocket build does not, and this is the
+          // first thing to read when the game hangs after its memory test,
+          // because the game polls bit 11 as the sound board's ready line and
+          // will wait for it forever.
+          //
+          //   bit 11  sound board ready (the line the game polls)
+          //   bits 10:0 the rest of the latch-control word
+          if (column == 0) screen_char="S";
+          else if (column == 1) screen_char="B";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
-            screen_char=hex32_ascii(d_cpu_response_status, column-3);
-          else if (column == 12) screen_char="L";
-          else if (column == 13) screen_char=":";
-          else if (column == 14) screen_char=8'h30+{7'd0, d_cpu_eret_flags[3]};
-          else if (column == 16) screen_char="N";
-          else if (column == 17) screen_char=":";
-          // The count lives in bits 31:16, so its low two digits are hex
-          // digits 2 and 3 of the word - column-16, not column-12.
-          else if (column >= 18 && column <= 19)
-            screen_char=hex32_ascii(d_cpu_eret_flags, column-16);
+            screen_char=hex32_ascii(d_cpu_eret_flags, column-3);
+          else if (column == 13) screen_char="R";
+          else if (column == 14) screen_char="D";
+          else if (column == 15) screen_char="Y";
+          else if (column == 16) screen_char=":";
+          else if (column == 17)
+            screen_char=8'h30+{7'd0, d_cpu_eret_flags[11]};
         end
         8: begin
           if (column == 0) screen_char="R";
@@ -661,20 +681,37 @@ module ki_debug_screen (
             screen_char=hex32_ascii(d_reset_first, column-3);
         end
         10: begin
+          // DL: ki_memory_bridge's download FSM, queue depth and flags. See
+          // the bit legend in README.md; state 16/17 with sdram_ready=0 means
+          // the bridge is waiting for the controller, not for the host.
           if (column == 0) screen_char="D";
-          else if (column == 1) screen_char="P";
+          else if (column == 1) screen_char="L";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_prev_op, column-3);
         end
-        // ET: the address eret actually jumped to, selected from EPC or
-        // ErrorEPC the same way cpu_cop0 selects eretPC. Captured rather than
-        // inferred so ERL does not have to be trusted to reconstruct it.
-        //
-        // AU shows first-audio time and the saturating discontinuity count.
+        // The Pocket port repurposes this row: ET carried the eret target on
+        // MiSTer, but the Pocket build has no eret capture wired, so BF shows
+        // the boot supervisor instead. AU/AF stay as audio health.
         11: begin
-          if (column == 0) screen_char="E";
-          else if (column == 1) screen_char="T";
+          // BF: boot supervisor flags.
+          //   bit 0  clk_sdram_ctl has toggled (SDRAM clock alive)
+          //   bit 1  reference PLL locked (ki_pll)
+          //   bit 2  Start+Select chord held (diagnostic)
+          //   bit 3  ioctl_download still asserted
+          //   bit 4  core PLL locked
+          //   bit 5  boot_loaded (ROM fully in SDRAM)
+          //   bit 6  sdram_ready
+          //   bit 7  loader FIFO overflow
+          //   bit 8  APF end marker (0x008F) seen
+          //   bit 9  short image (end marker before 0x480000)
+          //   bit 10 loader aborted (timeout fallback)
+          //   bit 11 loader_abort requested
+          //   bit 12 watchdog timed out
+          //   bits 15-13 boot_state (0 wait PLL, 1 wait SDRAM, 2 loading,
+          //              3 ready, 4 timeout)
+          if (column == 0) screen_char="B";
+          else if (column == 1) screen_char="F";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_ret_prev, column-3);
@@ -772,8 +809,8 @@ module ki_debug_screen (
           0: trace_char="K"; 1: trace_char="I";
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
-          9: trace_char="V"; 10: trace_char="1"; 11: trace_char="5";
-          12: trace_char="8";
+          9: trace_char="V"; 10: trace_char="1"; 11: trace_char="6";
+          12: trace_char="2";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin

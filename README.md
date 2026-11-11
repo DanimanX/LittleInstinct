@@ -361,3 +361,101 @@ python3 tools/package_pocket.py
 cp Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r /media/$USER/*/Cores/littleinstinct.KillerInstinct/
 ```
 
+
+### 10. v1.0.11 — watchdog del disco y confirmación de arranque
+
+**Resultado en hardware de v1.0.10:** el arranque quedó resuelto. La pantalla de
+diagnóstico reporta `RST:0 BOOT:1 PLL:1 HDD:1 SD:1 RX:00480000 SB:00000800
+RDY:1 AT:3`. Es decir: la ROM completa (4,718,592 bytes) llegó a SDRAM, la CPU
+salió de reset, la placa de sonido responde lista y el juego alcanza a sonar el
+bip de inicio. El cargador ya no es el problema.
+
+Lo que queda es que el juego se cuelga **después** del bip, leyendo el disco
+(`AT:3` = `ATA_PIO_READ`, el CPU dejó de drenar el puerto de datos a mitad de
+sector).
+
+- **Bug encontrado: el watchdog del disco abortaba transferencias válidas.**
+  `pk_io` bajaba `sd_ack` por timeout a los **167.8 ms** (`disk_watchdog[23]`).
+  `ki_ata.sv` marca el banco como **válido en el flanco de bajada de `sd_ack`
+  sin comprobar cuántas palabras llegaron**:
+
+  ```systemverilog
+  if (fetch_busy && !sd_ack && sd_ack_d) begin
+    bank_valid[fill_bank] <= 1'b1;   // sin verificar disk_words_rem
+  ```
+
+  Un timeout temprano entrega al CPU un sector a medias como si estuviera
+  completo. El síntoma no es un timeout visible sino datos corruptos, que
+  parecen un cuelgue del juego. 167.8 ms es un valor alcanzable por la primera
+  lectura de una ranura diferida desde microSD (metadatos FAT, despertar de
+  tarjeta).
+- **Corrección:** el watchdog pasa a **2.68 s** (`disk_watchdog[27]`), que sigue
+  acotando un deadlock real pero queda fuera del rango de cualquier latencia
+  legítima de tarjeta. Se añadió `disk_timeout` como bandera pegajosa, visible
+  en el dígito más alto del campo `DK:` (bit 31).
+- El campo `DK:` mostraba solo 24 de sus 32 bits; los 8 bajos llevaban
+  `sd_lba[7:0]` de los que nunca se veían más de siete. Ese hueco ahora carga la
+  bandera.
+
+Cómo leer `DK` cuando el juego se cuelga leyendo disco: si el primer dígito
+hexadecimal es `8` o mayor, el watchdog actuó y la transferencia quedó truncada;
+si es `0`, el APF respondió normalmente y el cuelgue está en otra parte.
+
+### 9. v1.0.10 — secuenciador de arranque, chord real y diagnóstico de carga
+
+El fallo observado en `IMG_20261111_180417.jpg` no era el detector de teclas: la
+CPU seguía en reset (`RST:1 BOOT:0`) porque la imagen nunca llegaba completa a
+SDRAM. El cargador esperaba un número exacto de bytes (0x480000) y no tenía
+ninguna salida si el host terminaba antes, si la FIFO se desbordaba o si el
+puente dejaba de drenar. Además, `pk_io` se reseteaba con `pll_locked` en vivo:
+un glitch del PLL a mitad de la transferencia borraba la FIFO y dejaba al
+cargador esperando una segunda copia de la ROM que la Pocket nunca reenvía.
+
+Cambios de esta pasada:
+
+- **`pocket_rtl/ki_boot_ctrl.sv` (nuevo):** secuenciador de arranque separado
+  del video y del input. Genera un reset de encendido *one-shot* para el
+  cargador (un unlock posterior del PLL ya no lo reinicia), espera
+  `boot_loaded & sdram_ready & bist_done` para liberar la CPU, y tiene dos
+  watchdog: 8 s con `ioctl_download` alto (aborta la carga para que el puente
+  drene y la CPU arranque con lo que haya) y 100 ms sin que `boot_loaded` suba
+  después de que el host terminó (marca el puente como atascado).
+- **`pocket_rtl/ki_input_chord.sv` (nuevo):** detector de Start + Select por
+  ventana temporal (250 ms), con sincronizadores de 2 flops. Ya no exige que
+  ambos botones coincidan en el mismo ciclo de 20 ns: el primero abre la
+  ventana y el segundo la cierra. Un botón solo no dispara nada, y mantener el
+  par no repite el toggle.
+- **`pk_io.sv`:** termina la carga también con el comando APF `0x008F`
+  (*data slot access all complete*) y no solo con el conteo exacto; añade
+  `loader_abort`; sincroniza `pad_key` a `clk_core`; y expone
+  `debug_loader_info`.
+- **Overlay de debug:** el toggle ahora es de tres estados (auto → on → off →
+  auto). Antes, con la consola sin arrancar, `!fb_write_seen` forzaba el
+  overlay y el toggle parecía muerto; ahora "off" se respeta.
+- **Página de debug V160:** la fila 1 muestra `RST`, `BOOT`, `SD` (SDRAM ready)
+  y `L` (estado del boot); `RX` son los bytes entregados al cargador; `DL` es
+  la FSM de descarga del puente; `BF` agrupa las banderas de arranque.
+- **`tests/sim/`:** cuatro bancos de Icarus Verilog (chord, boot, loader,
+  end-to-end pk_io → puente → SDRAM). Ejecutar con `tests/sim/run.sh`.
+
+Bits de `DL` (fila 10), de MSB a LSB: `state[31:27]`, `download_count[26:22]`,
+`download_inflight[21]`, `ioctl_download[20]`, `sdram_ready[19]`,
+`boot_seen[18]`, `boot_loaded[17]`, puntero de escritura `[16:13]`, puntero de
+lectura `[12:9]`, `download_push[8]`, `download_pop[7]`, `sdram_done[6]`,
+`boot_download[5]`, `download_accept[4]`, relleno `[3:0]`. Los estados 16/17 son
+`DOWNLOAD_SDRAM_WRITE_ISSUE` / `_WAIT`.
+
+Cómo leer la pantalla cuando no arranca:
+
+- `SD:0` → el controlador SDRAM no salió de su secuencia de encendido. Si
+  además `BF` tiene el bit 0 en 0, `clk_sdram_ctl` nunca osciló (salida del PLL
+  o del fitter), no es un problema del cargador; si el bit 0 está en 1, el reloj
+  vive y el controlador está atascado.
+- `SD:1`, `BOOT:0`, `DL` con estado `16`/`17` y `download_count > 0` → el
+  puente está esperando que una escritura SDRAM termine.
+- `SD:1`, `BOOT:0`, `RX` menor que `00480000` y `BF` con el bit 9 (`short`) →
+  el host terminó antes del tamaño esperado; el bit 7 (`overflow`) indica que
+  se perdieron palabras en la FIFO.
+- `BF` con el bit 12 (`timeout`) → el watchdog de 8 s actuó; la CPU se libera
+  con la imagen parcial y el juego puede no arrancar, pero ya no queda en reset
+  silencioso.

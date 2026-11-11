@@ -67,6 +67,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) r
 # ---- Pocket top (new code, this port)
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_pll.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/pk_io.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_input_chord.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_boot_ctrl.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_pocket_top.sv ]
 
 # the core itself, as upstream ships it with the shell swapped out

@@ -31,6 +31,9 @@ module emu
 	output [31:0] target_dataslot_length,
 	output [31:0] disk_bridge_rd_data,
 	input  [31:0] pad_key,
+	// APF Host Command 0x008F: all data slot accesses complete. This is the
+	// host's end-of-stream marker for the ROM slot.
+	input         apf_dataslot_complete,
 	input         ref_pll_locked,
 	output        core_pll_locked,
 	output        core_sdram_ready,
@@ -170,7 +173,7 @@ localparam CONF_STR = {
 `endif
 	"R0,Reset;",
 	"J1,High Quick,High Medium,High Fierce,Low Quick,Low Medium,Low Fierce,Start,Coin,Service,Test,Pause;",
-	"V,1.60"
+	"V,1.61"
 };
 
 wire [1:0] buttons;
@@ -260,6 +263,37 @@ assign core_sdram_ready = sdram_ready;
 
 // Analogue Pocket: the APF bridge feeds the same core-facing ioctl_* bus that
 // MiSTer's hps_io drove. See pocket_rtl/pk_io.sv.
+//
+// Boot sequencing. These wires are declared before pk_io because the loader
+// consumes the supervisor's outputs; the status inputs are driven by the
+// bridge and self test further down.
+wire boot_loaded;
+wire sdram_ready;
+wire bist_busy;
+wire bist_done;
+wire loader_reset;
+wire loader_abort;
+wire [2:0] boot_state;
+wire boot_timed_out;
+wire boot_ready;
+wire [31:0] debug_loader_info;
+wire [31:0] debug_download_info;
+
+ki_boot_ctrl boot_ctrl (
+	.clk         (clk_core),
+	.pll_locked  (pll_locked),
+	.boot_loaded (boot_loaded),
+	.sdram_ready (sdram_ready),
+	.bist_done   (bist_done),
+	.loader_busy (ioctl_download),
+	.loader_reset(loader_reset),
+	.loader_abort(loader_abort),
+	.boot_ready  (boot_ready),
+	.state       (boot_state),
+	.timed_out   (boot_timed_out),
+	.elapsed     ()
+);
+
 wire [31:0] debug_disk_info;
 pk_io #(.ROM_BYTES(4718592)) pk_io
 (
@@ -284,6 +318,10 @@ pk_io #(.ROM_BYTES(4718592)) pk_io
 	.pad_key                    (pad_key),
 	.game_select                (16'h0000),      // KI1; KI2 sets bit 0 via interact.json later
 	.dip_switches_i             (16'hffff),
+	.loader_reset               (loader_reset),
+	.loader_abort               (loader_abort),
+	.loader_end                 (apf_dataslot_complete),
+	.debug_loader_info          (debug_loader_info),
 	.clk                        (clk_core),
 	.status                     (status),
 	.buttons                    (buttons),
@@ -345,18 +383,32 @@ wire img_reset = 1'b0;
 
 wire core_reset = shell_reset | ioctl_download | img_reset;
 
-wire boot_loaded;
-wire sdram_ready;
-// Declared here rather than beside their instance because cpu_reset below
-// uses them. Quartus tolerates the forward reference, but relying on that for
-// a term that gates the CPU reset is not worth the risk.
-wire bist_busy;
-wire bist_done;
-// Hold the CPU until the SDRAM self test has finished with the memory path.
-// The test is built only into the debug build; the release build ties
-// bist_done high. done, not busy: done latches when the test completes, so
-// there is no cycle between the test starting and the CPU being released.
-wire cpu_reset = core_reset | ~boot_loaded | ~sdram_ready | ~bist_done;
+// The CPU is released by the boot sequencer, not by a chain of terms written
+// out here. boot_ready is boot_loaded & sdram_ready & bist_done.
+wire cpu_reset = core_reset | ~boot_ready;
+
+// Is clk_sdram_ctl actually toggling? The adapter's sdram_ready cannot rise
+// without it, so "SD:0" has two very different causes: a controller that is
+// still counting, or an output the PLL/fitter did not produce. A free-running
+// divider in the SDRAM clock domain and a toggle synchronizer answer that
+// without another clock crossing protocol. BF bit 0 is the sticky result.
+reg  [7:0] sdram_clk_div  = 8'd0;
+reg        sdram_clk_tog  = 1'b0;
+always @(posedge clk_sdram_ctl) begin
+	sdram_clk_div <= sdram_clk_div + 8'd1;
+	if (sdram_clk_div == 8'hff)
+		sdram_clk_tog <= ~sdram_clk_tog;
+end
+
+reg [2:0] sdram_clk_sync = 3'd0;
+reg       sdram_clk_seen = 1'b0;
+always @(posedge clk_core) begin
+	sdram_clk_sync <= {sdram_clk_sync[1:0], sdram_clk_tog};
+	if (sdram_clk_sync[2] != sdram_clk_sync[1])
+		sdram_clk_seen <= 1'b1;
+	if (shell_reset)
+		sdram_clk_seen <= 1'b0;
+end
 wire [9:0] h_count;
 wire [9:0] v_count;
 
@@ -740,6 +792,26 @@ wire framebuffer_memory_data_valid;
 wire framebuffer_memory_done;
 wire fb_write_accept_pulse;
 reg  fb_write_seen = 1'b0;
+
+// Framebuffer liveness.
+//
+// The overlay used to auto-hide as soon as the CPU wrote its first framebuffer
+// line, on the assumption that "it is drawing, so it is healthy". That is wrong
+// exactly when it matters: a game that draws its POST and then hangs satisfies
+// the assumption and hides the page that explains why. The Pocket has no OSD
+// bit to fall back on (pk_io drives status to 0), so the Start+Select chord was
+// the only route to the page - and a hung core gives no other sign.
+//
+// This counts FRAMES since the last accepted framebuffer write, not clocks. A
+// 28-bit cycle counter cost more registers than the device had left (the fit
+// failed by one LAB). Counting vblanks is both cheaper - six bits - and the
+// more honest unit: a running game writes a line every frame, so "no writes
+// for N frames" is the question worth asking. 2 s at ~59 Hz is 120 frames.
+localparam integer FB_STALL_FRAMES = 120;
+localparam [6:0] FB_STALL_MAX = FB_STALL_FRAMES[6:0];
+reg [6:0] fb_idle    = 7'd0;
+reg       fb_stalled = 1'b0;
+
 always @(posedge clk_core) begin
 	if (core_reset)
 		fb_write_seen <= 1'b0;
@@ -747,6 +819,22 @@ always @(posedge clk_core) begin
 	         ((debug_cpu_pc_sync[31:16] != 16'hbfc0) ||
 	          (debug_cpu_pc_sync[15:0] >= 16'h06a8)))
 		fb_write_seen <= 1'b1;
+
+	// A framebuffer write clears the stall; a frame boundary without one
+	// advances it. Counting vblanks rather than every clock keeps this to
+	// seven registers instead of twenty-eight.
+	if (core_reset) begin
+		fb_idle    <= 7'd0;
+		fb_stalled <= 1'b0;
+	end else if (fb_write_accept_pulse) begin
+		fb_idle    <= 7'd0;
+		fb_stalled <= 1'b0;
+	end else if (frame_start) begin
+		if (fb_idle != FB_STALL_MAX)
+			fb_idle <= fb_idle + 7'd1;
+		else
+			fb_stalled <= 1'b1;
+	end
 end
 wire [7:0] framebuffer_red;
 wire [7:0] framebuffer_green;
@@ -1286,7 +1374,8 @@ ki_memory_bridge memory_bridge
 	.perf_cpu_burst(bridge_perf_burst),
 	.debug_write_count(),
 	.debug_low_write_count(),
-	.debug_main_write_count()
+	.debug_main_write_count(),
+	.debug_download_info(debug_download_info)
 );
 
 `ifdef KI_DEBUG_BUILD
@@ -1542,6 +1631,46 @@ wire [7:0] debug_red;
 wire [7:0] debug_green;
 wire [7:0] debug_blue;
 
+// Start + Select. The ids in input.json are id 10 = 1P Start, id 11 = Insert
+// Coin (the Pocket's Select button), so those are the bits to watch. The old
+// detector also watched bits 14/15 and 8/9, which are either unused or two
+// kick buttons, and ANDed them in the live clock domain - both a false-positive
+// and a metastability risk. ki_input_chord owns the whole function now.
+wire dbg_chord_pulse;
+wire dbg_chord_held;
+ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
+	.clk      (clk_core),
+	.reset    (shell_reset),
+	.start_i  (joystick_0[10]),
+	.select_i (joystick_0[11]),
+	.pulse    (dbg_chord_pulse),
+	.both_held(dbg_chord_held)
+);
+
+// Repurposed status-page fields, all of which were wired to constants before.
+//   row 5  DS -> RX  bytes handed to the ROM loader
+//   row 10 DP -> DL  bridge download FSM / queue
+//   row 11 ET -> BF  boot flags
+// See ki_debug_screen.sv for the bit legends.
+wire [31:0] debug_loader_summary = {9'd0, debug_loader_info[27:6], 1'b0};
+wire [31:0] debug_boot_summary = {
+	16'd0,
+	boot_state,             // bits 15:13
+	boot_timed_out,         // bit 12
+	loader_abort,           // bit 11
+	debug_loader_info[0],   // bit 10 aborted
+	debug_loader_info[1],   // bit 9  short image
+	debug_loader_info[2],   // bit 8  end marker seen
+	loader_overflow,        // bit 7
+	sdram_ready,            // bit 6
+	boot_loaded,            // bit 5
+	pll_locked,             // bit 4
+	ioctl_download,         // bit 3
+	dbg_chord_held,         // bit 2
+	ref_pll_locked,         // bit 1
+	sdram_clk_seen          // bit 0  clk_sdram_ctl has toggled
+};
+
 wire [6:0] fps_value;
 wire fps_box_pixel;
 wire fps_glyph_pixel;
@@ -1565,13 +1694,13 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(32'd0),
-		.cpu_ret_prev(32'd0),
-		.cpu_eret_flags(32'd0),
+		.cpu_prev_op(debug_download_info),
+		.cpu_ret_prev(debug_boot_summary),
+		.cpu_eret_flags({16'd0, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),
-		.cpu_ret_pc(32'd0),
-		.pcm_health(32'd0),
-		.pcm_level(32'd0),
+		.cpu_ret_pc(debug_loader_summary),
+		.pcm_health(dcs_pcm_health),
+		.pcm_level(dcs_pcm_level),
 		.cpu_response_status(32'd0),
 		.reset_info(debug_reset_info),
 		.reset_first(debug_reset_first),
@@ -1600,6 +1729,8 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.bist_error_count(bist_error_count),
 		.bist_first_bad_expected(bist_first_bad_expected),
 		.bist_first_bad_actual(bist_first_bad_actual),
+		.boot_state(boot_state),
+		.sdram_ready(sdram_ready),
 		.red(debug_red),
 		.green(debug_green),
 		.blue(debug_blue)
@@ -1614,18 +1745,23 @@ end else begin : g_no_overlays
 	assign debug_blue      = 8'h00;
 end endgenerate
 
-reg debug_overlay_manual = 1'b0;
-reg [1:0] dbg_toggle_d = 2'b00;
-wire dbg_toggle_press = (joystick_0[14] && joystick_0[15]) || (joystick_0[8] && joystick_0[9]) || (joystick_0[10] && joystick_0[11]);
-
+// Overlay mode is deliberately three-state, not a boolean. A boolean cannot
+// express "the operator asked for it off" separately from "the game has not
+// drawn yet", so on a machine that never boots the auto-show term wins and
+// the toggle appears dead. auto -> on -> off -> auto.
+localparam [1:0] OVL_AUTO = 2'd0, OVL_ON = 2'd1, OVL_OFF = 2'd2;
+reg [1:0] overlay_mode = OVL_AUTO;
 always @(posedge clk_core) begin
-	dbg_toggle_d <= {dbg_toggle_d[0], dbg_toggle_press};
-	if (dbg_toggle_d == 2'b01) begin
-		debug_overlay_manual <= ~debug_overlay_manual;
-	end
+	if (shell_reset)
+		overlay_mode <= OVL_AUTO;
+	else if (dbg_chord_pulse)
+		overlay_mode <= (overlay_mode == OVL_OFF) ? OVL_AUTO
+		                                           : overlay_mode + 2'd1;
 end
 
-wire show_debug = (!fb_write_seen) || debug_overlay_manual || (|cpu_errors) || status[4];
+wire show_debug = (overlay_mode == OVL_ON) ||
+                  ((overlay_mode == OVL_AUTO) &&
+                   ((!fb_write_seen) || fb_stalled || (|cpu_errors) || status[4]));
 
 reg [7:0] red;
 reg [7:0] green;
@@ -1635,7 +1771,7 @@ always @(*) begin
 	green = 8'h00;
 	blue = 8'h00;
 	if(VGA_DE) begin
-		// Game or Debug. Automatically shows KI DEBUG V159 (if enabled)
+		// Game or Debug. Automatically shows KI DEBUG V160 (if enabled)
 		// until the CPU begins drawing the boot screen into the framebuffer,
 		// or whenever the user holds START + SELECT on the Pocket.
 		// When debug overlay is disabled, mute video to clean solid black
@@ -1676,7 +1812,7 @@ assign HDMI_FREEZE = 1'b0;
 assign HDMI_BLACKOUT = 1'b0;
 assign HDMI_BOB_DEINT = 1'b0;
 
-assign LED_USER = ioctl_download | ~boot_loaded | (|cpu_errors);
+assign LED_USER = ioctl_download | ~boot_loaded | (|cpu_errors) | boot_timed_out;
 assign LED_POWER = 2'b00;
 assign LED_DISK = {2{sd_rd | sd_wr}};
 assign BUTTONS = {1'b0, startup_osd_button};

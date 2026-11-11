@@ -529,6 +529,7 @@ ki_pocket_top iki (
     .disk_bridge_rd_data        ( disk_bridge_rd_data ),
 
     .pad_key                    ( cont1_key ),
+    .apf_dataslot_complete      ( dataslot_allcomplete ),
 
     .video_rgb          ( video_rgb ),
     .video_rgb_clock    ( video_rgb_clock ),

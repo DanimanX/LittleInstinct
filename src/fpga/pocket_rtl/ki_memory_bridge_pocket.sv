@@ -160,7 +160,9 @@ module ki_memory_bridge #(
   output logic [15:0] perf_cpu_burst = 16'd0,
   output logic [31:0] debug_write_count = 32'h0000_0000,
   output logic [31:0] debug_low_write_count = 32'h0000_0000,
-  output logic [31:0] debug_main_write_count = 32'h0000_0000
+  output logic [31:0] debug_main_write_count = 32'h0000_0000,
+  // Loader-side state for the debug page: FSM, queue depth, end-to-end flags.
+  output logic [31:0] debug_download_info
 );
   import ki_board_pkg::*;
 
@@ -1586,6 +1588,27 @@ module ki_memory_bridge #(
   // share ki_sdram_burst through this bridge, so all CPU SDRAM requests must be
   // serialized through IDLE rather than bypassing the bridge via fast_tog.
   assign fast_ok = 1'b0;
+
+  // One word for the debug page: enough to tell "the loader is waiting for the
+  // SDRAM" (state=DOWNLOAD_SDRAM_WRITE_ISSUE, sdram_ready=0) from "the host
+  // stopped sending" (boot_seen=1, count=0, ioctl_download=1).
+  assign debug_download_info = {
+    state,
+    download_count,
+    download_inflight,
+    ioctl_download,
+    sdram_ready,
+    boot_seen,
+    boot_loaded,
+    download_write_pointer,
+    download_read_pointer,
+    download_push,
+    download_pop,
+    sdram_done,
+    boot_download,
+    download_accept,
+    4'd0
+  };
 
 `ifndef SYNTHESIS
   // fast_ok holds through FB_LINE_WRITE on this.

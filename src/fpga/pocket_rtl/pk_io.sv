@@ -63,9 +63,23 @@ module pk_io #(
 	input  wire [15:0] game_select,      // 0 = KI1, 1 = KI2
 	input  wire [15:0] dip_switches_i,
 
+	// ---- boot sequencing (ki_boot_ctrl) -----------------------------------
+	// loader_reset is a one-shot POWER-ON reset, not a live PLL-lock gate:
+	// once the first ROM byte has arrived the loader must survive a lock
+	// glitch, because the host never sends the image a second time.
+	input  wire        loader_reset,
+	// Fallback: the boot supervisor timed out. Finish the stream, release
+	// ioctl_download and let the bridge drain and the CPU run.
+	input  wire        loader_abort,
+	// APF Host Command 0x008F (data slot access all complete). The exact
+	// byte count in the ROM slot is not part of the protocol contract; this
+	// is the host saying "no more writes are coming".
+	input  wire        loader_end,
+
 	// ---- core-facing, as hps_io --------------------------------------------
 	input  wire        clk,              // clk_core
 	output reg  [127:0] status,
+	output wire [31:0] debug_loader_info,
 	output wire  [1:0] buttons,
 	output wire        forced_scandoubler,
 	output wire [31:0] joystick_0,
@@ -133,7 +147,7 @@ module pk_io #(
 		.data(fifo_din), .wrclk(clk_74a), .wrreq(fifo_wr),
 		.rdclk(clk), .rdreq(fifo_rd), .q(fifo_dout),
 		.rdempty(fifo_empty), .wrfull(fifo_full),
-		.aclr(~apf_reset_n), .eccstatus(), .rdfull(), .rdusedw(), .wrempty(), .wrusedw()
+		.aclr(loader_reset), .eccstatus(), .rdfull(), .rdusedw(), .wrempty(), .wrusedw()
 	);
 
 	// 512-byte sector write buffer (128 x 32-bit words) for ATA sector writes (0x0184)
@@ -239,7 +253,37 @@ module pk_io #(
 		endcase
 	end
 
-	reg [23:0] disk_watchdog = 24'd0;
+	// Watchdog for a deferred-slot read/write that never completes. It exists so
+	// a stuck APF handshake cannot hang the loader forever - NOT as a deadline
+	// for a legitimate transfer.
+	//
+	// The timeout was 2^23 clocks = 167.8 ms, and that was a bug. ki_ata marks a
+	// bank VALID on the falling edge of sd_ack without checking how many words
+	// actually arrived (ki_ata.sv: "if (fetch_busy && !sd_ack && sd_ack_d)"), so
+	// a watchdog that fires EARLY hands the CPU a half-filled sector as if it
+	// were complete. 167.8 ms is inside the range of a first deferred-slot read
+	// from a microSD card, which includes FAT metadata lookups and can include
+	// card wake-up. The failure is silent wrong data, which looks like the game
+	// hanging mid-disk-read rather than like a timeout.
+	//
+	// 2^27 = 2.68 s is far beyond any card latency worth waiting for and still
+	// bounds a genuine deadlock.
+	localparam integer DISK_TIMEOUT_BIT = 27;
+	reg [DISK_TIMEOUT_BIT:0] disk_watchdog = {DISK_TIMEOUT_BIT+1{1'b0}};
+	reg        disk_timeout = 1'b0;
+
+	// The APF's end-of-transfer marker is a level in clk_74a. It is latched
+	// here and only acted on once the FIFO has stayed empty for a grace
+	// window, so a bridge write still in flight cannot be cut off. The boot
+	// ROM is required to be present (BOOT_BYTES_MIN) before the marker is
+	// allowed to finish the stream; a short image is then reported, not
+	// silently accepted.
+	localparam [26:0] BOOT_BYTES_MIN = 27'h0080000;
+	reg [1:0]  loader_end_sync    = 2'b00;
+	reg        loader_end_latched = 1'b0;
+	reg        loader_short       = 1'b0;
+	reg        loader_aborted     = 1'b0;
+	reg [15:0] end_grace          = 16'd0;
 
 	always @(posedge clk) begin
 		fifo_rd      <= 1'b0;
@@ -260,7 +304,7 @@ module pk_io #(
 			img_mounted <= 1'b1;
 		end
 
-		if (!apf_reset_n) begin
+		if (loader_reset) begin
 			st             <= S_SEL;
 			ioctl_download <= 1'b0;
 			ioctl_addr     <= 27'd0;
@@ -271,6 +315,10 @@ module pk_io #(
 			disk_is_write  <= 1'b0;
 			img_size       <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
 			img_mounted    <= 1'b0;
+			loader_end_latched <= 1'b0;
+			loader_short       <= 1'b0;
+			loader_aborted     <= 1'b0;
+			end_grace          <= 16'd0;
 		end else if (core_menu_reset) begin
 			// On menu soft-reset, DO NOT re-enter S_SEL or re-assert ioctl_download:
 			// APF only streams the boot ROM once on initial core launch.
@@ -285,10 +333,17 @@ module pk_io #(
 			end
 			status <= 128'd0;
 
+			// Latch the APF end marker. It is a level held by the host, so a
+			// two-flop sync is enough; the latch removes any dependence on
+			// when the marker happens to be sampled.
+			loader_end_sync <= {loader_end_sync[0], loader_end};
+			if (loader_end_sync[1])
+				loader_end_latched <= 1'b1;
+
 			if (disk_active)
-				disk_watchdog <= disk_watchdog + 24'd1;
+				disk_watchdog <= disk_watchdog + 1'b1;
 			else
-				disk_watchdog <= 24'd0;
+				disk_watchdog <= {DISK_TIMEOUT_BIT+1{1'b0}};
 
 			// Start an APF deferred slot read when ki_ata asserts sd_rd
 			if (st == S_DONE && !disk_active && sd_rd) begin
@@ -311,7 +366,16 @@ module pk_io #(
 				st                         <= S_WR_WAIT0;
 			end
 
-			case (st)
+			if (loader_abort) begin
+				// Fallback: the boot supervisor timed out waiting for the image.
+				// Finish the stream and release ioctl_download so the bridge can
+				// drain and boot_loaded can rise. The debug page reports the
+				// abort, so a partial image is visible rather than silent.
+				loader_aborted <= 1'b1;
+				st             <= S_DONE;
+				ioctl_download <= 1'b0;
+				disk_active    <= 1'b0;
+			end else case (st)
 			// The selector and the DIPs are single words the core latches on
 			// ioctl_wr with the matching index; emit them before the stream so
 			// the download FSM sees them first, as on MiSTer.
@@ -333,8 +397,24 @@ module pk_io #(
 			S_WAIT: begin
 				ioctl_index <= 16'h0001;
 				if (!fifo_empty && !ioctl_wait) begin
-					fifo_rd <= 1'b1;
-					st      <= S_RD;
+					fifo_rd   <= 1'b1;
+					st        <= S_RD;
+					end_grace <= 16'd0;
+				end else if (loader_end_latched && fifo_empty &&
+				             (wr_addr >= BOOT_BYTES_MIN)) begin
+					// The host says no more writes are coming and the FIFO has
+					// been empty long enough that nothing can still be in flight.
+					// Finish on the host's marker rather than on an exact byte
+					// count, which is not part of the APF slot contract.
+					if (end_grace == 16'hffff) begin
+						if (wr_addr < ROM_BYTES_27)
+							loader_short <= 1'b1;
+						st <= S_DONE;
+					end else begin
+						end_grace <= end_grace + 16'd1;
+					end
+				end else begin
+					end_grace <= 16'd0;
 				end
 			end
 			S_RD: begin
@@ -380,7 +460,13 @@ module pk_io #(
 					fifo_rd <= 1'b1;
 					st      <= S_DISK_RD;
 				end else if (disk_active &&
-				             ((disk_done_sync[2] == disk_req_tog) || disk_watchdog[23])) begin
+				             ((disk_done_sync[2] == disk_req_tog) ||
+				              disk_watchdog[DISK_TIMEOUT_BIT])) begin
+					// Sticky: a timeout here means the APF stopped answering, and
+					// ki_ata will have accepted a partial bank as complete. Surface
+					// it on the debug page instead of letting it look like a game bug.
+					if (disk_watchdog[DISK_TIMEOUT_BIT])
+						disk_timeout <= 1'b1;
 					sd_ack      <= 1'b0;
 					disk_active <= 1'b0;
 				end
@@ -429,9 +515,17 @@ module pk_io #(
 	end
 
 	// ---------------------------------------------------------------- pad/status/reset
-	// The APF key bitmap already uses the same bit layout the core's
-	// joystick_0 expects ([0] up ... [15] start), so it passes through.
-	assign joystick_0         = pad_key;
+	// The APF key bitmap is generated in the clk_74a domain. Synchronize it
+	// before anything in clk_core samples it: the game inputs and the Start +
+	// Select chord detector both read these bits, and a raw crossing can
+	// produce a phantom press (or, worse, a phantom chord).
+	reg [31:0] pad_key_meta = 32'd0;
+	reg [31:0] pad_key_sync = 32'd0;
+	always @(posedge clk) begin
+		pad_key_meta <= pad_key;
+		pad_key_sync <= pad_key_meta;
+	end
+	assign joystick_0         = pad_key_sync;
 	assign joystick_1         = 32'd0;
 	assign ps2_key            = 11'd0;
 	assign forced_scandoubler = 1'b0;
@@ -451,7 +545,12 @@ module pk_io #(
 
 	assign buttons = {core_menu_reset, ~apf_reset_n};   // [1] = reset, [0] = apf_reset
 
+	// disk_timeout is the MSB so it lands on the first hex digit of the DK
+	// field, which is the only part of this word the page displays (the row
+	// shows bits 31:8). Its LSBs carried sd_lba[7:0], of which only seven bits
+	// were ever visible.
 	assign debug_disk_info = {
+		disk_timeout,
 		tcmd_st,
 		tcmd_err,
 		target_dataslot_done,
@@ -462,7 +561,21 @@ module pk_io #(
 		fifo_empty,
 		fifo_full,
 		disk_words_rem[11:0],
-		sd_lba[7:0]
+		sd_lba[6:0]
+	};
+
+	// Loader summary for the debug page. wr_addr counts bytes handed to the
+	// core; the shift by one fits the 0x480000 maximum in 22 bits and leaves
+	// room for the FSM state and the sticky flags.
+	assign debug_loader_info = {
+		st,
+		wr_addr[22:1],
+		fifo_empty,
+		fifo_full,
+		overflow_r,
+		loader_end_latched,
+		loader_short,
+		loader_aborted
 	};
 endmodule
 
