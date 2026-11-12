@@ -173,7 +173,7 @@ localparam CONF_STR = {
 `endif
 	"R0,Reset;",
 	"J1,High Quick,High Medium,High Fierce,Low Quick,Low Medium,Low Fierce,Start,Coin,Service,Test,Pause;",
-	"V,1.61"
+	"V,1.62"
 };
 
 wire [1:0] buttons;
@@ -386,6 +386,7 @@ wire core_reset = shell_reset | ioctl_download | img_reset;
 // The CPU is released by the boot sequencer, not by a chain of terms written
 // out here. boot_ready is boot_loaded & sdram_ready & bist_done.
 wire cpu_reset = core_reset | ~boot_ready;
+
 
 // Is clk_sdram_ctl actually toggling? The adapter's sdram_ready cannot rise
 // without it, so "SD:0" has two very different causes: a controller that is
@@ -901,6 +902,43 @@ reg debug_vblank_cpu_meta = 1'b0;
 reg debug_vblank_cpu_sync = 1'b0;
 reg debug_vblank_cpu_seen = 1'b0;
 reg debug_cpu_reset_d = 1'b1;
+
+// ---------------------------------------------------------------------------
+// First-reboot capture.
+//
+// The reported failure is that the game boots, plays its startup beep, draws
+// partway and REBOOTS. RS/RF/RC already count resets and name their cause, but
+// they are live and sticky across the whole run, so by the time anyone reads
+// the page the interesting moment is a few hundred frames gone. This latches
+// the one thing that is gone: WHERE THE CPU WAS, and which term pulled reset.
+//
+// Armed only after boot_ready has been high at least once, so the power-on
+// reset it is waiting behind cannot be confused with the reboot.
+reg [31:0] debug_reboot_pc    = 32'h0000_0000;
+reg  [5:0] debug_reboot_cause = 6'd0;
+reg        debug_reboot_valid = 1'b0;
+reg        boot_seen_once     = 1'b0;
+
+always @(posedge clk_core) begin
+	if (boot_ready)
+		boot_seen_once <= 1'b1;
+
+	if (cpu_reset && !debug_cpu_reset_d && boot_seen_once && !debug_reboot_valid) begin
+		debug_reboot_pc <= debug_cpu_pc_sync;
+		debug_reboot_cause <= {
+			shell_reset,        // bit 5  APF/OSD/menu reset or PLL loss
+			ioctl_download,     // bit 4  the loader restarted the stream
+			~boot_loaded,       // bit 3  boot_loaded dropped
+			~sdram_ready,       // bit 2  SDRAM controller left ready
+			~bist_done,         // bit 1  self test restarted
+			~pll_locked         // bit 0  core PLL unlocked
+		};
+		debug_reboot_valid <= 1'b1;
+	end
+
+	if (core_reset)
+		debug_reboot_valid <= 1'b0;
+end
 reg debug_ioctl_download_d = 1'b0;
 // Reset provenance is retained across the resets it records:
 //   (top digit)   always 0.
@@ -1700,11 +1738,11 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_ret_count(debug_restart_info),
 		.cpu_ret_pc(debug_loader_summary),
 		.pcm_health(dcs_pcm_health),
-		.pcm_level(dcs_pcm_level),
+		.pcm_level({26'd0, debug_reboot_cause}),
 		.cpu_response_status(32'd0),
 		.reset_info(debug_reset_info),
 		.reset_first(debug_reset_first),
-		.ata_info(debug_ata_info_sync),
+		.ata_info(debug_reboot_pc),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
 		.video_max_v_count(video_max_v_count),
 		.video_vblank_seen(video_vblank_seen),

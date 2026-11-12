@@ -29,6 +29,18 @@ run tb_pk_io_paths \
 	tests/sim/dcfifo_model.sv tests/sim/tb_pk_io_paths.sv \
 	src/fpga/pocket_rtl/pk_io.sv
 
+# Data integrity through the real memory path. -P sweeps the SDRAM model's read
+# latency; see tests/sim/README.md for what this bench does and does not prove.
+run tb_readback \
+	tests/sim/dcfifo_model.sv tests/sim/sdram_model.sv tests/sim/tb_readback.sv \
+	upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_board_pkg.sv \
+	src/fpga/pocket_rtl/pk_io.sv \
+	src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv \
+	upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_sdram_adapter.sv \
+	upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_sdram_x2.sv \
+	upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_sdram_burst.sv \
+	upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_fast_fill.sv
+
 run tb_loader_e2e \
 	tests/sim/dcfifo_model.sv tests/sim/sdram_model.sv tests/sim/tb_loader_e2e.sv \
 	upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_board_pkg.sv \

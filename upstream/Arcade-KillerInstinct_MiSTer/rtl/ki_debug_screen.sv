@@ -503,7 +503,7 @@ module ki_debug_screen (
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="2";
+          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="3";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -769,18 +769,33 @@ module ki_debug_screen (
         //   digits 3-4   the live sector-buffer index
         //   digits 5-7   data-port writes accepted, the write-path counter
         // AF shows the worst output step and the same discontinuity count.
+        // RP/CA: the first reboot after the core came out of reset.
+        //
+        //   RP  the PC at the rising edge of cpu_reset
+        //   CA  which reset terms were true then:
+        //         bit 0 core PLL unlocked      bit 3 boot_loaded dropped
+        //         bit 1 self test restarted     bit 4 loader restarted
+        //         bit 2 SDRAM left ready        bit 5 APF/menu reset
+        //
+        // ATA status used to live here; the disk has since been confirmed
+        // working (AT:0, the deferred slot completing cleanly), and the
+        // question this row answers - why the game restarts - is the open one.
         14: begin
-          if (column == 0) screen_char="A";
-          else if (column == 1) screen_char="C";
+          if (column == 0) screen_char="R";
+          else if (column == 1) screen_char="P";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_ata_info, column-3);
           else if (column == 11) screen_char=" ";
-          else if (column == 12) screen_char="A";
-          else if (column == 13) screen_char="F";
+          else if (column == 12) screen_char="C";
+          else if (column == 13) screen_char="A";
           else if (column == 14) screen_char=":";
-          else if (column >= 15 && column <= 19)
-            screen_char=hex32_ascii(d_pcm_level, column-12);
+          else if (column == 15) screen_char="0";
+          else if (column == 16) screen_char="0";
+          // 6 bits of cause as two hex digits, always two so the column a
+          // digit sits in means the same thing every time.
+          else if (column == 17) screen_char=hex_ascii({2'b00, d_pcm_level[5:4]});
+          else if (column == 18) screen_char=hex_ascii(d_pcm_level[3:0]);
         end
         default: screen_char = " ";
       endcase
@@ -810,7 +825,7 @@ module ki_debug_screen (
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
           9: trace_char="V"; 10: trace_char="1"; 11: trace_char="6";
-          12: trace_char="2";
+          12: trace_char="3";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin
