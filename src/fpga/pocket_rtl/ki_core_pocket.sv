@@ -875,11 +875,6 @@ reg  fb_write_seen = 1'b0;
 // failed by one LAB). Counting vblanks is both cheaper - six bits - and the
 // more honest unit: a running game writes a line every frame, so "no writes
 // for N frames" is the question worth asking. 2 s at ~59 Hz is 120 frames.
-localparam integer FB_STALL_FRAMES = 120;
-localparam [6:0] FB_STALL_MAX = FB_STALL_FRAMES[6:0];
-reg [6:0] fb_idle    = 7'd0;
-reg       fb_stalled = 1'b0;
-
 always @(posedge clk_core) begin
 	if (core_reset)
 		fb_write_seen <= 1'b0;
@@ -887,22 +882,6 @@ always @(posedge clk_core) begin
 	         ((debug_cpu_pc_sync[31:16] != 16'hbfc0) ||
 	          (debug_cpu_pc_sync[15:0] >= 16'h06a8)))
 		fb_write_seen <= 1'b1;
-
-	// A framebuffer write clears the stall; a frame boundary without one
-	// advances it. Counting vblanks rather than every clock keeps this to
-	// seven registers instead of twenty-eight.
-	if (core_reset) begin
-		fb_idle    <= 7'd0;
-		fb_stalled <= 1'b0;
-	end else if (fb_write_accept_pulse) begin
-		fb_idle    <= 7'd0;
-		fb_stalled <= 1'b0;
-	end else if (frame_start) begin
-		if (fb_idle != FB_STALL_MAX)
-			fb_idle <= fb_idle + 7'd1;
-		else
-			fb_stalled <= 1'b1;
-	end
 end
 wire [7:0] framebuffer_red;
 wire [7:0] framebuffer_green;
@@ -1855,23 +1834,21 @@ end else begin : g_no_overlays
 	assign debug_blue      = 8'h00;
 end endgenerate
 
-// Overlay mode is deliberately three-state, not a boolean. A boolean cannot
-// express "the operator asked for it off" separately from "the game has not
-// drawn yet", so on a machine that never boots the auto-show term wins and
-// the toggle appears dead. auto -> on -> off -> auto.
+// Overlay mode is three-state: OVL_AUTO shows debug only before first frame
+// write or on severe error; START+SELECT chord toggles it OFF if currently
+// visible, or ON if currently hidden.
 localparam [1:0] OVL_AUTO = 2'd0, OVL_ON = 2'd1, OVL_OFF = 2'd2;
 reg [1:0] overlay_mode = OVL_AUTO;
 always @(posedge clk_core) begin
 	if (shell_reset)
 		overlay_mode <= OVL_AUTO;
 	else if (dbg_chord_pulse)
-		overlay_mode <= (overlay_mode == OVL_OFF) ? OVL_AUTO
-		                                           : overlay_mode + 2'd1;
+		overlay_mode <= show_debug ? OVL_OFF : OVL_ON;
 end
 
 wire show_debug = (overlay_mode == OVL_ON) ||
                   ((overlay_mode == OVL_AUTO) &&
-                   ((!fb_write_seen) || fb_stalled || (|cpu_errors) || status[4]));
+                   ((!fb_write_seen) || (|cpu_errors) || status[4]));
 
 reg [7:0] red;
 reg [7:0] green;

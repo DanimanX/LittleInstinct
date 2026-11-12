@@ -525,7 +525,54 @@ module pk_io #(
 		pad_key_meta <= pad_key;
 		pad_key_sync <= pad_key_meta;
 	end
-	assign joystick_0         = pad_key_sync;
+	// Map APF cont1_key to MiSTer joystick_0 expected by Killer Instinct:
+	//   Pocket (cont1_key):
+	//     [0]  D-Pad Up
+	//     [1]  D-Pad Down
+	//     [2]  D-Pad Left
+	//     [3]  D-Pad Right
+	//     [4]  Button A (MK)
+	//     [5]  Button B (QK)
+	//     [6]  Button X (MP)
+	//     [7]  Button Y (QP)
+	//     [8]  Trigger L (FP)
+	//     [9]  Trigger R (FK)
+	//     [10] Trigger L2 (Service)
+	//     [11] Trigger R2
+	//     [14] Select (Coin 1)
+	//     [15] Start (1P Start)
+	//
+	//   KI / MiSTer joystick_0:
+	//     [0]  Right
+	//     [1]  Left
+	//     [2]  Down
+	//     [3]  Up
+	//     [4]  High Quick (QP)
+	//     [5]  High Medium (MP)
+	//     [6]  High Fierce (FP)
+	//     [7]  Low Quick (QK)
+	//     [8]  Low Medium (MK)
+	//     [9]  Low Fierce (FK)
+	//     [10] 1P Start
+	//     [11] Coin 1
+	//     [12] Service Mode
+	assign joystick_0 = {
+		16'd0,
+		3'd0,
+		pad_key_sync[10], // 12: Service Mode (L2)
+		pad_key_sync[14], // 11: Coin 1 (Select)
+		pad_key_sync[15], // 10: 1P Start (Start)
+		pad_key_sync[9],  //  9: Low Fierce / FK (R)
+		pad_key_sync[4],  //  8: Low Medium / MK (A)
+		pad_key_sync[5],  //  7: Low Quick / QK (B)
+		pad_key_sync[8],  //  6: High Fierce / FP (L)
+		pad_key_sync[6],  //  5: High Medium / MP (X)
+		pad_key_sync[7],  //  4: High Quick / QP (Y)
+		pad_key_sync[0],  //  3: Up
+		pad_key_sync[1],  //  2: Down
+		pad_key_sync[2],  //  1: Left
+		pad_key_sync[3]   //  0: Right
+	};
 	assign joystick_1         = 32'd0;
 	assign ps2_key            = 11'd0;
 	assign forced_scandoubler = 1'b0;
