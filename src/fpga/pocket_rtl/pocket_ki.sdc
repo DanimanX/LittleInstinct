@@ -29,29 +29,28 @@ derive_clock_uncertainty
 # collections come back empty, and Quartus ignores the constraint with only a
 # warning (this cost a build cycle - the slack did not move a thousandth).
 
-# ---- CPU clock asynchronous to clk_core -------------------------------------
-# Both are 50 MHz, but out 1 is phase-shifted 250 ps from out 0. Treating them
-# as related asks for the data to land within that 250 ps window, which no
-# register-to-register path can do; the CPU's return FIFO failed by -6.5 ns and
-# the boot ROM hung on its first cached read. They cross through synchronisers,
-# so they are separate asynchronous groups.
-set_clock_groups -asynchronous \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}]
-
-# ---- CPU asynchronous to the SDRAM pin clock ---------------------------------
-set_clock_groups -asynchronous \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk}]
-
 # ---- the SDRAM clock as it leaves the device --------------------------------
 create_generated_clock -name KI_SDRAM_CLK \
   -source [get_pins -compatibility_mode {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk}] \
   [get_ports {dram_clk}]
 
+# ---- Asynchronous Clock Groups -----------------------------------------------
+# Group 1: APF bridge & input PLL clocks (clk_74a, clk_74b, bridge_spiclk, u_pll).
+# Group 2: Core PLL main clocks (clk_core 50MHz, sdram_ctl 100MHz, sdram_cap 100MHz).
+#          Crossings between general[0] and general[4]/[5] are bounded by multicycle paths.
+# Group 3: Core CPU clock (clk_cpu 50MHz). Carries a 250ps phase offset from clk_core.
+#          Crosses through explicit synchronisers.
+# Group 4: SDRAM pin clock (clk_sdram_pin 100MHz, dram_clk).
 set_clock_groups -asynchronous \
+  -group [get_clocks {clk_74a clk_74b bridge_spiclk ic|iki|u_pll|*divclk}] \
+  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk \
+                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk \
+                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[5].gpll~PLL_OUTPUT_COUNTER|divclk}] \
   -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {KI_SDRAM_CLK}]
+  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk KI_SDRAM_CLK}]
+
+# ---- Asynchronous Reset Paths -----------------------------------------------
+set_false_path -from [get_keepers {*rst_sync[*]}]
 
 # ---- SDRAM board timing -----------------------------------------------------
 # Same numbers upstream uses: the Pocket's DRAM part is a 512 Mbit x16 like
@@ -83,3 +82,8 @@ set_false_path -to [get_keepers {*|debug_cpu_pc_meta[*]}]
 set_false_path -to [get_keepers {*|debug_cpu_retired_meta[*]}]
 set_false_path -to [get_keepers {*|debug_trace_frozen_meta}]
 set_false_path -to [get_keepers {*|debug_trace_shadow[*]}]
+set_false_path -to [get_keepers {*|debug_dep_valid_meta}]
+set_false_path -to [get_keepers {*|debug_dep_pc_hold[*]}]
+set_false_path -to [get_keepers {*|debug_dep_op_hold[*]}]
+set_false_path -to [get_keepers {*|debug_dep_trig_hold[*]}]
+set_false_path -to [get_keepers {*|debug_dep_cause_hold[*]}]

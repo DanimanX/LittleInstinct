@@ -127,6 +127,13 @@ entity ki_cpu_core is
       debug_irq_count : out std_logic_vector(31 downto 0);
       debug_t2_reload_count : out std_logic_vector(31 downto 0);
       debug_h1_op           : out std_logic_vector(31 downto 0);
+      -- Departure capture: the last address in the decompressed program, which
+      -- of the two departure shapes it was, and whether one was captured. The
+      -- opcode that left travels on debug_h1_op above. See cpu.vhd's ports of
+      -- the same names.
+      debug_dep_pc          : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_dep_valid       : out std_logic := '0';
+      debug_dep_trigger     : out std_logic_vector(1 downto 0) := (others => '0');
       debug_exc_cause       : out std_logic_vector(31 downto 0);
       debug_ret_count       : out std_logic_vector(31 downto 0);
       debug_retire_pc       : out std_logic_vector(31 downto 0);
@@ -357,6 +364,9 @@ begin
          debug_irq_count       => debug_irq_count,
          debug_t2_reload_count => debug_t2_reload_count,
          debug_h1_op           => debug_h1_op,
+         debug_dep_pc          => debug_dep_pc,
+         debug_dep_valid       => debug_dep_valid,
+         debug_dep_trigger     => debug_dep_trigger,
          debug_exc_cause       => debug_exc_cause,
          debug_ret_count       => debug_ret_count,
          debug_retire_pc       => debug_retire_pc,

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 `default_nettype none
 
-module ki_debug_screen (
+module ki_debug_screen #(
+  parameter bit ENABLE_EXTRA_PAGES = 1'b0
+) (
   input  wire         clk,
   input  wire         frame_start,
   input  wire   [9:0] h_count,
@@ -503,7 +505,7 @@ module ki_debug_screen (
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="4";
+          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="7";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -647,19 +649,32 @@ module ki_debug_screen (
           else if (column == 17)
             screen_char=8'h30+{7'd0, d_cpu_eret_flags[11]};
         end
+        // EX: the COP0 Cause latched at the departure (row 14's DP/DO pair).
+        // This row carried RS, the reset provenance counters, which read
+        // 00000000 on every run because nothing resets the core after boot.
+        //
+        // ExcCode is bits 6:2, so read the value as a word and shift:
+        //   00000004 AdEL (bad load address)   00000028 RI  (reserved instr.)
+        //   00000014 AdES (bad store address)  00000020 Sys (system call)
+        //   00000000 Int  (interrupt)          0000001C/2C/30/34 TLB faults
+        //
+        // RI is the interesting one here: a reserved instruction at DP means the
+        // core either executed code it should not have or decoded a word it
+        // fetched wrongly, and either way the exception handler sends control to
+        // the boot ROM - which is exactly what DP/V/C report.
         8: begin
-          if (column == 0) screen_char="R";
-          else if (column == 1) screen_char="S";
+          if (column == 0) screen_char="E";
+          else if (column == 1) screen_char="X";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_reset_info, column-3);
         end
-        // RP: the last address executed in RAM before control left it.
-        // DO: the opcode fetched at the DEPARTURE address in RL, which is the
-        // instruction that sends control to the boot ROM.
+        // DP: the last address executed in RAM before control left it.
+        // DO: the opcode at THAT address (same decode, see cpu_pocket.vhd).
         //
-        // DO names that instruction: a jr/j is the game rebooting itself
-        // deliberately, which is what an error or watchdog path looks like.
+        // DO names that instruction: a jr/jalr/j is the game leaving on
+        // purpose; a load/store with a bad address, or a word that is not a
+        // legal MIPS III instruction, is a fault - and EX (row 8) says which.
         //
         // RF isolates the first reset the operator did NOT cause, which the
         // sticky mask in RS cannot do - every test run contains one deliberate
@@ -681,11 +696,23 @@ module ki_debug_screen (
             screen_char=hex32_ascii(d_reset_first, column-3);
         end
         10: begin
-          // DL: ki_memory_bridge's download FSM, queue depth and flags. See
-          // the bit legend in README.md; state 16/17 with sdram_ready=0 means
-          // the bridge is waiting for the controller, not for the host.
+          // DO: the opcode ONE DECODE BEFORE the last PC in the program, which
+          // for a jump is the branch itself. Read it with DP (row 14):
+          //
+          //   DO = a jr/jalr (000000xx) or a j (02xxxxxx), and DP = DO's delay
+          //   slot: the program jumped out on purpose. For a restart that is
+          //   the game deciding to go back to the boot ROM, which is what an
+          //   error path or a watchdog path looks like in software.
+          //
+          //   Anything else is the instruction preceding the faulting one, so
+          //   read DP as the last instruction that got to run.
+          //
+          // This row carried the loader's download FSM (DL) until v1.0.14. The
+          // loader is settled (RX:00480000, BOOT:1 on every run since
+          // v1.0.10), and the boot supervisor on row 11 already reports loader
+          // state, timeout and abort.
           if (column == 0) screen_char="D";
-          else if (column == 1) screen_char="L";
+          else if (column == 1) screen_char="O";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_prev_op, column-3);
@@ -769,36 +796,50 @@ module ki_debug_screen (
         //   digits 3-4   the live sector-buffer index
         //   digits 5-7   data-port writes accepted, the write-path counter
         // AF shows the worst output step and the same discontinuity count.
-        // RP/CA: the first reboot after the core came out of reset.
+        // DP/V/C: the departure capture, which replaced the reboot capture in
+        // v1.0.14.
         //
-        //   RP  the PC one clk_core before the rising edge of cpu_reset
-        //   V   whether a capture was taken at all (read this FIRST)
-        //   CA  which reset terms were true then:
-        //         bit 0 core PLL unlocked      bit 4 loader restarted
-        //         bit 1 APF held RESET         bit 5 shell reset term
-        //         bit 2 SDRAM left ready       bit 6 core_reset asserted
-        //         bit 3 boot_loaded dropped    bit 7 APF menu reset
+        //   DP  the last address executed in the decompressed program (0x88xxxxxx)
+        //       before control left it - the delay slot of the branch in DO,
+        //       when the exit was a branch
+        //   V   whether a departure was captured at all (read this FIRST)
+        //   C   01 = control went to the boot ROM, 10 = it dropped straight back
+        //       to 0x88000000 with no boot ROM in between
         //
-        // ATA status used to live here; the disk has since been confirmed
-        // working (AT:0, the deferred slot completing cleanly), and the
-        // question this row answers - why the game restarts - is the open one.
+        // The old row latched the PC and reset-cause mask on the rising edge of
+        // cpu_reset, and two hardware runs read V:0 from it: no reset term ever
+        // asserted after boot. A game can restart itself in software, with no
+        // reset at all, so the reset capture could not answer the question. The
+        // departure capture is armed by the jump itself and can.
+        //
+        // Two readings to keep straight, because the screen invites both:
+        //
+        //   V:1 does NOT by itself prove a restart. The game may legitimately
+        //   call into the boot ROM and that transition is captured too, so
+        //   cross check with RC (row 12), whose high half counts RAM -> boot ROM
+        //   transitions, and with PC (row 4).
+        //
+        //   V:0 with the game stopped means it neither reset nor jumped - it is
+        //   HUNG - so the next thing to read is PC (row 4) and the disk
+        //   (row 13).
         14: begin
-          if (column == 0) screen_char="R";
+          // The delay-slot relationship between DP and DO, and the validity
+          // caveat, are in the block comment above.
+          if (column == 0) screen_char="D";
           else if (column == 1) screen_char="P";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_ata_info, column-3);
-          // V is the CAPTURE-VALID bit, and it must be read before CA. Without
-          // it "CA:00" is ambiguous: it can mean "no reset term was active" or
-          // "the capture never fired and these are reset values". The first
-          // hardware report was exactly that ambiguity, caused by a bug in the
-          // capture block itself.
+          // V is the CAPTURE-VALID bit, and it must be read before C. Without
+          // it "C:00" is ambiguous: it can mean "no departure" or "the capture
+          // never fired and these are reset values". The first hardware report
+          // was exactly that ambiguity, caused by a bug in the reset capture.
           else if (column == 12) screen_char="V";
           else if (column == 13) screen_char=":";
           else if (column == 14) screen_char=8'h30 + {7'd0, d_pcm_level[8]};
           else if (column == 16) screen_char="C";
           else if (column == 17) screen_char=":";
-          // 8 cause bits, two hex digits, always in the same columns.
+          // Two trigger bits, two hex digits, always in the same columns.
           else if (column == 18) screen_char=hex_ascii(d_pcm_level[7:4]);
           else if (column == 19) screen_char=hex_ascii(d_pcm_level[3:0]);
         end
@@ -826,11 +867,19 @@ module ki_debug_screen (
       source = trace[512 + {entry_index, 2'd0} +: 4];
       case (row)
         0: case (column)
+          // The Pocket build has no live CPU trace (DEBUG_TRACE is off), so this
+          // page carries the departure capture instead: row 8 holds the last PC
+          // in the decompressed program and the opcode that left it, row 9 the
+          // cause (01 = RAM -> boot ROM, 10 = dropped back to 0x88000000), the
+          // capture-valid bit and the trigger id. Everything else on the page
+          // reads zero, which is what "no exception context was recorded" looks
+          // like. The title stays TRACE because the MiSTer build shares this
+          // file and page 1 there really is the CPU trace.
           0: trace_char="K"; 1: trace_char="I";
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
           9: trace_char="V"; 10: trace_char="1"; 11: trace_char="6";
-          12: trace_char="4";
+          12: trace_char="7";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin
@@ -965,14 +1014,19 @@ module ki_debug_screen (
     // once and never changes again, and KillerInstinct.sv latches it on the
     // clk_core side only after that freeze has been observed, so it is already
     // a stable capture rather than a live value being sampled.
-    case (page)
-      2'd1: character = trace_char(v_count[7:4], h_count[8:4],
-                                   trace_bus, trace_valid);
-      2'd2: character = perf_char(v_count[7:4], h_count[8:4], perf, perf_worst);
-      2'd3: character = prof_char(v_count[7:4], h_count[8:4], perf_prof, prof_fine_base);
-      default: character = screen_char(v_count[7:4], h_count[8:4],
-                                       diagnostic_snapshot, bist_snapshot);
-    endcase
+    if (ENABLE_EXTRA_PAGES) begin
+      case (page)
+        2'd1: character = trace_char(v_count[7:4], h_count[8:4],
+                                     trace_bus, trace_valid);
+        2'd2: character = perf_char(v_count[7:4], h_count[8:4], perf, perf_worst);
+        2'd3: character = prof_char(v_count[7:4], h_count[8:4], perf_prof, prof_fine_base);
+        default: character = screen_char(v_count[7:4], h_count[8:4],
+                                         diagnostic_snapshot, bist_snapshot);
+      endcase
+    end else begin
+      character = screen_char(v_count[7:4], h_count[8:4],
+                              diagnostic_snapshot, bist_snapshot);
+    end
     glyph = glyph_bits(character);
     font_x = h_count[3:1];
     font_y = v_count[3:1];

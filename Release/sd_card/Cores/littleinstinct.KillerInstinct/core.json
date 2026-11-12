@@ -9,8 +9,8 @@
             "description": "Killer Instinct / Killer Instinct 2 arcade (Midway KI hardware), port of Arcade-KillerInstinct_MiSTer.",
             "author": "littleinstinct",
             "url": "https://github.com/DanimanX/LittleInstinct",
-            "version": "1.0.13",
-            "date_release": "2026-11-10"
+            "version": "1.0.17",
+            "date_release": "2026-11-12"
         },
         "framework": {
             "target_product": "Analogue Pocket",

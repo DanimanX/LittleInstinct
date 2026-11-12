@@ -726,7 +726,74 @@ reg [4:0] debug_trace_settle = 5'd0;
 reg [895:0] debug_trace_shadow = 896'd0;
 reg debug_trace_valid = 1'b0;
 wire [31:0] debug_cpu_ret_count;
+// COP0 Cause at the departure, captured in the CPU by the same statement that
+// records DP/DO. This is the field that names WHY control left the program:
+// ExcCode sits in bits 6:2 (0x4 AdEL, 0x5 AdES, 0x8 Sys, 0xA RI, 0x7/0xB/0xC/
+// 0xD TLB, 0x0 Int). It has been captured since the departure capture went in
+// but was wired to nothing, so the one value that separates "the game jumped"
+// from "the game faulted" never reached the screen.
+//
+// Captured only on the 01 path (program -> boot ROM). On the 10 path it holds
+// whatever the previous 01 departure left, which is why C: must be read too.
+wire [31:0] debug_cpu_exc_cause;
 reg [31:0] debug_cpu_ret_count_meta = 32'h0, debug_cpu_ret_count_sync = 32'h0;
+// Departure capture from the CPU: the last PC executed in the decompressed
+// program (the delay slot of the branch that left, when it left by one), the
+// opcode one decode before it (that branch), and which of the two departure
+// shapes it was. See the longer note at the capture block below, and
+// cpu_pocket.vhd for the detector.
+wire [31:0] debug_cpu_dep_pc;
+wire        debug_cpu_dep_valid;
+wire  [1:0] debug_cpu_dep_trigger;
+wire [31:0] debug_cpu_prev_op;
+
+// Crossing the capture into clk_core.
+//
+// These registers are held by the CPU from the departure until the next one, so
+// the DATA is not what needs synchronising - only the news that it arrived. So
+// the strobe is synchronised (two flops, rising-edge detected) and the payload
+// is latched from the CPU-domain wires when the strobe lands. By then the
+// payload has been still for at least two clk_core cycles, which is the
+// standard "stable data, delayed strobe" crossing and costs one register per
+// payload bit instead of two.
+//
+// The one assumption is that the CPU cannot depart twice inside that 40 ns
+// window. It cannot: both departure shapes need many instructions between them,
+// and the payload registers are only written at a decode that leaves the
+// decompressed program. If that ever changed the symptom would be a mixed
+// capture - PC from one departure, opcode from the next - not a frozen one.
+//
+// This matters for the fit: a full two-flop sync of the 64-bit payload pair cost
+// 0.5 ns of clk_core slack for no extra correctness, in a design with one LAB of
+// headroom.
+(* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
+reg        debug_dep_valid_meta = 1'b0;
+reg        debug_dep_valid_sync = 1'b0;
+reg        debug_dep_valid_d    = 1'b0;
+reg [31:0] debug_dep_pc_hold    = 32'd0;
+reg [31:0] debug_dep_op_hold    = 32'd0;
+reg  [1:0] debug_dep_trig_hold  = 2'd0;
+reg  [7:0] debug_dep_cause_hold = 8'd0;
+
+wire debug_dep_strobe = debug_dep_valid_sync & ~debug_dep_valid_d;
+
+always @(posedge clk_core) begin
+	debug_dep_valid_meta <= debug_cpu_dep_valid;
+	debug_dep_valid_sync <= debug_dep_valid_meta;
+	debug_dep_valid_d    <= debug_dep_valid_sync;
+
+	if (shell_reset) begin
+		debug_dep_pc_hold    <= 32'd0;
+		debug_dep_op_hold    <= 32'd0;
+		debug_dep_trig_hold  <= 2'd0;
+		debug_dep_cause_hold <= 8'd0;
+	end else if (debug_dep_strobe) begin
+		debug_dep_pc_hold    <= debug_cpu_dep_pc;
+		debug_dep_op_hold    <= debug_cpu_prev_op;
+		debug_dep_trig_hold  <= debug_cpu_dep_trigger;
+		debug_dep_cause_hold <= debug_cpu_exc_cause[7:0];
+	end
+end
 (* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
 reg [31:0] debug_cpu_pc_meta = 32'h0000_0000;
 (* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
@@ -904,56 +971,29 @@ reg debug_vblank_cpu_seen = 1'b0;
 reg debug_cpu_reset_d = 1'b1;
 
 // ---------------------------------------------------------------------------
-// First-reboot capture.
+// Departure capture: what replaced the first-reboot capture.
 //
-// The reported failure is that the game boots, plays its startup beep, draws
-// partway and REBOOTS. RS/RF/RC already count resets and name their cause, but
-// they are live and sticky across the whole run, so by the time anyone reads
-// the page the interesting moment is a few hundred frames gone. This latches
-// the one thing that is gone: WHERE THE CPU WAS, and which term pulled reset.
+// The old block latched the CPU's PC and the reset-cause mask on the rising
+// edge of cpu_reset. Two hardware reports (v1.0.12 and v1.0.13) read
+// RP:00 V:0 from it: the capture never fired. That is a real finding, not a
+// bug - nothing in cpu_reset's term list ever asserted after boot - but it
+// leaves the original question unanswered, because a game can restart itself
+// in SOFTWARE, with no reset at all, by jumping out of its decompressed
+// program. That path leaves no trace in any reset counter and no evidence on
+// any row of this screen.
 //
-// Armed only after boot_ready has been high at least once, so the power-on
-// reset it is waiting behind cannot be confused with the reboot.
+// So what is captured now is the departure itself, inside the CPU, where the
+// decode is visible (see cpu_pocket.vhd): the last PC executed in the
+// decompressed program, the opcode one decode before it, and which of the two
+// shapes it was - 01 = jumped into the boot ROM (an error or watchdog path),
+// 10 = jumped straight back to 0x88000000 (a deliberate restart). It is armed
+// by the departure, not by a reset, so it fires on exactly the case the reset
+// capture could not see.
 //
-// THIS BLOCK HAD A BUG, and the first hardware report (RP:00 CA:00) was its
-// signature, not a finding: the "clear on core_reset" term sat AFTER the
-// capture in the same always block, and in Verilog the last nonblocking
-// assignment wins. Every reboot caused by core_reset therefore cleared its own
-// capture in the cycle it was taken, leaving both fields at their reset values.
-// The capture is now sticky: it records the FIRST reboot after boot and is
-// only re-armed by a fresh power-on (boot_seen_once for the next run).
-//
-// The PC comes from a one-cycle shadow rather than from debug_cpu_pc_sync
-// directly, because that sync register is zeroed by shell_reset in another
-// block and would report 0x00000000 for exactly the resets worth explaining.
-reg [31:0] debug_pc_prev      = 32'h0000_0000;
-reg [31:0] debug_reboot_pc    = 32'h0000_0000;
-reg  [7:0] debug_reboot_cause = 8'd0;
-reg        debug_reboot_valid = 1'b0;
-reg        boot_seen_once     = 1'b0;
-
-always @(posedge clk_core) begin
-	debug_pc_prev <= debug_cpu_pc_sync;
-
-	if (boot_ready)
-		boot_seen_once <= 1'b1;
-
-	// Sticky for the whole run once taken.
-	if (cpu_reset && !debug_cpu_reset_d && boot_seen_once && !debug_reboot_valid) begin
-		debug_reboot_pc <= debug_pc_prev;
-		debug_reboot_cause <= {
-			buttons[1],         // bit 7  APF menu / interact reset
-			core_reset,         // bit 6  core_reset asserted
-			shell_reset,        // bit 5  shell reset term
-			ioctl_download,     // bit 4  the loader restarted the stream
-			~boot_loaded,       // bit 3  boot_loaded dropped
-			~sdram_ready,       // bit 2  SDRAM controller left ready
-			RESET,              // bit 1  the APF held RESET
-			~pll_locked         // bit 0  core PLL unlocked
-		};
-		debug_reboot_valid <= 1'b1;
-	end
-end
+// This costs no new page and no new snapshot bits: the capture lands in the two
+// fields this screen already had - DP on row 14 and DO on row 10 - and reuses
+// the V and C columns of row 14 for validity and trigger. The synchroniser is
+// declared up with the other CPU-domain crossings.
 reg debug_ioctl_download_d = 1'b0;
 // Reset provenance is retained across the resets it records:
 //   (top digit)   always 0.
@@ -1300,8 +1340,11 @@ ki_cpu_core #(
 	.debug_gpr_s1(),
 	.debug_irq_count(debug_cpu_irq_count),
 	.debug_t2_reload_count(debug_cpu_t2_reload_count),
-	.debug_h1_op(),
-	.debug_exc_cause(),
+	.debug_h1_op(debug_cpu_prev_op),
+	.debug_dep_pc(debug_cpu_dep_pc),
+	.debug_dep_valid(debug_cpu_dep_valid),
+	.debug_dep_trigger(debug_cpu_dep_trigger),
+	.debug_exc_cause(debug_cpu_exc_cause),
 	.debug_ret_count(debug_cpu_ret_count),
 	.debug_trace_bus(debug_cpu_trace_bus),
 	.debug_trace_frozen(debug_cpu_trace_frozen),
@@ -1702,9 +1745,17 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
 
 // Repurposed status-page fields, all of which were wired to constants before.
 //   row 5  DS -> RX  bytes handed to the ROM loader
-//   row 10 DP -> DL  bridge download FSM / queue
+//   row 10 DP -> DO  the opcode that left the decompressed program
 //   row 11 ET -> BF  boot flags
+//   row 14 RP -> DP  where the decompressed program was left
 // See ki_debug_screen.sv for the bit legends.
+//
+// Rows 10 and 14 used to carry the loader's download FSM (DL) and the reboot
+// capture (RP/V/CA). Both answered questions that are now settled: the loader
+// delivers the whole image (RX:00480000, BOOT:1 on every run since v1.0.10),
+// and the reboot capture never fired because no reset term asserts after boot
+// (V:0 across two hardware runs). The departure capture answers the question
+// that is still open, so it takes those two rows.
 wire [31:0] debug_loader_summary = {9'd0, debug_loader_info[27:6], 1'b0};
 wire [31:0] debug_boot_summary = {
 	16'd0,
@@ -1747,18 +1798,23 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(debug_download_info),
+		.cpu_prev_op(debug_dep_op_hold),
 		.cpu_ret_prev(debug_boot_summary),
 		.cpu_eret_flags({16'd0, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),
 		.cpu_ret_pc(debug_loader_summary),
 		.pcm_health(dcs_pcm_health),
-		// {23 unused, capture-valid, 8 cause bits} - the page reads bit 8 as V.
-		.pcm_level({23'd0, debug_reboot_valid, debug_reboot_cause}),
+		// {23 unused, departure valid, 6 unused, 2-bit trigger} - the page reads
+		// bit 8 as V and bits 7:0 as C, so this shows V:1 and C:01 / C:10 once a
+		// departure has been captured, and V:0 before that.
+		.pcm_level({23'd0, debug_dep_valid_sync, 6'd0, debug_dep_trig_hold}),
 		.cpu_response_status(32'd0),
-		.reset_info(debug_reset_info),
+		// Row 8 shows EX: the COP0 Cause latched with DP/DO.
+		// Latched synchronously on debug_dep_strobe into debug_dep_cause_hold (8 bits)
+		// in clk_core. Bits 6:2 contain ExcCode.
+		.reset_info({24'd0, debug_dep_cause_hold}),
 		.reset_first(debug_reset_first),
-		.ata_info(debug_reboot_pc),
+		.ata_info(debug_dep_pc_hold),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
 		.video_max_v_count(video_max_v_count),
 		.video_vblank_seen(video_vblank_seen),

@@ -166,7 +166,27 @@ entity cpu is
       debug_t2_reload_count : out std_logic_vector(31 downto 0) := (others => '0');
       -- Departure opcode, exception state, and restart counters retained by
       -- the current fault-capture contract.
+      -- DO shows the opcode AT debug_dep_pc. It comes from debug_prev_op_live
+      -- (the decode at that same address), NOT from hist_op1, which is two
+      -- decodes older and described nothing useful.
       debug_h1_op           : out std_logic_vector(31 downto 0) := (others => '0');
+      -- Departure capture. The MiSTer page showed DP and DO; the Pocket port
+      -- left both wired to constants, so a restart was visible on screen but
+      -- unexplained.
+      --
+      -- DO needs no new register: debug_h1_op below is already latched by the
+      -- same departure test. It holds debug_prev_op_live, which is the opcode
+      -- at the same address debug_dep_pc reports, so the pair reads directly:
+      -- "the instruction at DP was DO". (It used to hold hist_op1, two decodes
+      -- older, which made the pair unreadable.)
+      --
+      -- The landing address is not carried either: trigger 01 always means the
+      -- boot ROM and 10 always means 0x88000000, so a 32-bit register would
+      -- only restate the trigger.
+      debug_dep_pc          : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_dep_valid       : out std_logic := '0';
+      -- "01" program -> boot ROM, "10" straight back to 0x88000000.
+      debug_dep_trigger     : out std_logic_vector(1 downto 0) := (others => '0');
       debug_exc_cause       : out std_logic_vector(31 downto 0) := (others => '0');
       debug_ret_count       : out std_logic_vector(31 downto 0) := (others => '0');
       -- The stage-4 data address at the moment the stall watchdog trips.
@@ -530,8 +550,11 @@ architecture arch of cpu is
    signal dep_valid                    : unsigned(1 downto 0) := (others => '0');
    signal hist_op1                     : std_logic_vector(31 downto 0) := (others => '0');
    signal debug_h1_op_r                : std_logic_vector(31 downto 0) := (others => '0');
+   signal debug_dep_pc_register        : std_logic_vector(31 downto 0) := (others => '0');
+   signal debug_dep_trigger_register   : std_logic_vector(1 downto 0) := (others => '0');
+   signal debug_dep_valid_register     : std_logic := '0';
    signal debug_prev_op_live           : std_logic_vector(31 downto 0) := (others => '0');
-   signal debug_exc_cause_register     : std_logic_vector(31 downto 0) := (others => '0');
+   signal debug_exc_cause_register     : std_logic_vector(7 downto 0) := (others => '0');
    signal cop0_debug_cause             : unsigned(31 downto 0);
    signal cop0_debug_epc               : unsigned(31 downto 0);
    signal cop0_debug_badvaddr          : unsigned(31 downto 0);
@@ -1571,8 +1594,11 @@ begin
    debug_ret_count <= std_logic_vector(debug_entry_count_register) &
                       std_logic_vector(debug_ret_count_register(15 downto 0));
    debug_h1_op <= debug_h1_op_r;
+   debug_dep_pc      <= debug_dep_pc_register;
+   debug_dep_valid   <= debug_dep_valid_register;
+   debug_dep_trigger <= debug_dep_trigger_register;
    -- The opcode AT the departure pc, captured in the same statement as it.
-   debug_exc_cause <= debug_exc_cause_register;
+   debug_exc_cause <= x"000000" & debug_exc_cause_register;
 
    process (clk93)
    begin
@@ -1892,10 +1918,19 @@ begin
          if (reset_93 = '1') then
             debug_fetch_pc_register <= (others => '0');
             debug_t2_reload_register <= (others => '0');
+            -- The departure registers are cleared HERE and captured in the same
+            -- process below. They must not also be cleared in the other clk93
+            -- process (the trace-capture one): two processes driving one signal
+            -- is rejected by Quartus, and the trace block's reset is not the
+            -- owner of these registers.
             -- debug_ret_count_register is NOT cleared here. It is written by
             -- the decodeNewPulse process, and a register driven from two
             -- processes is illegal for synthesis - Quartus rejects it outright
             -- while ModelSim resolves it silently.
+            debug_dep_pc_register      <= (others => '0');
+            debug_dep_trigger_register <= (others => '0');
+            debug_dep_valid_register   <= '0';
+            debug_exc_cause_register   <= (others => '0');
          elsif (ce_93 = '1' and stall = 0 and decodeNew = '1') then
             debug_fetch_pc_register <= std_logic_vector(PCold1(31 downto 0));
             debug_prev_op_live      <= std_logic_vector(opcode1);
@@ -1908,11 +1943,40 @@ begin
             -- Read the landing address: BFC00000 is the reset vector,
             -- BFC00380 the general exception vector for Status.BEV = 1, and
             -- anything else is an ordinary call into ROM code.
+            --
+            -- Which cycle is which, because this cost two wrong readings:
+            --   P_k  = PCold1 during cycle k,  O_k = opcode1 during cycle k,
+            --          so O_k is the instruction AT P_k.
+            -- The register updates are nonblocking, so during cycle N
+            --   debug_fetch_pc_register holds P(N-1), debug_prev_op_live
+            --   holds O(N-1), and hist_op1 holds O(N-2).
+            -- The test below requires the OLD debug_fetch_pc_register to be in
+            -- 0x88xxxxxx and PCold1 to be in the boot ROM, so the departure
+            -- address is P(N-1) - the value latched into debug_dep_pc_register.
+            -- Therefore the opcode AT the departure address is
+            -- debug_prev_op_live. hist_op1 is TWO decodes back and does not
+            -- describe the departure at all; it was carried over from upstream
+            -- and made DO unreadable.
             if (debug_fetch_pc_register(31 downto 24) = x"88" and
                 (PCold1(31 downto 20) = x"9FC" or
                  PCold1(31 downto 20) = x"BFC")) then
-               debug_h1_op_r <= hist_op1;
-               debug_exc_cause_register <= std_logic_vector(cop0_debug_cause);
+               debug_h1_op_r <= debug_prev_op_live;
+               debug_dep_pc_register      <= debug_fetch_pc_register;
+               debug_dep_trigger_register <= "01";
+               debug_dep_valid_register   <= '1';
+               debug_exc_cause_register   <= std_logic_vector(cop0_debug_cause(7 downto 0));
+            end if;
+
+            -- The other restart shape: the game jumps straight back to its own
+            -- entry point without passing through the boot ROM. ram_reentry is
+            -- exactly that test, already built for the trace trigger, so it is
+            -- reused rather than compared again. Its own entry-count gate keeps
+            -- the legitimate hand-off at boot out of this capture.
+            if (ram_reentry = '1') then
+               debug_h1_op_r              <= debug_prev_op_live;
+               debug_dep_pc_register      <= debug_fetch_pc_register;
+               debug_dep_trigger_register <= "10";
+               debug_dep_valid_register   <= '1';
             end if;
 
             -- The store is in the branch DELAY SLOT, so "the loop ran 256

@@ -17,18 +17,19 @@ The project compiles, synthesizes, physically fits, and generates the complete `
 - **Unified Memory Architecture in SDRAM ([`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv)):**
   - **Framebuffer in SDRAM:** Eliminated dependency on 2.4 Mbits of on-chip BRAM. Both CPU accesses (`FB_READ_ISSUE`, `FB_WRITE`, `FB_LINE_WRITE`) and video scanout (`VID_ISSUE` / `VID_WAIT`) read and write directly to SDRAM in 16-word bursts, integrating the write-combining buffer (`wb_gather_ok`) to coalesce 32-byte bursts per cycle.
   - **DCS Sound ROM in SDRAM:** Completely eliminated the legacy MiSTer DDR3 mailbox. The 4 MiB DCS sound ROM (`STORE_DCS = 0x0a0_0000`) is downloaded alongside the Boot ROM directly into SDRAM via `DOWNLOAD_SDRAM_WRITE_ISSUE`. Audio ADSP reads (`dcs_rom_request`) are serviced directly from SDRAM with real sample data.
-- **CPU 100 MHz Timing Closure Optimizations ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd) & [`cpu_datacache.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_datacache.vhd)):**
+- **CPU Datapath & Resource Optimizations ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd) & [`cpu_datacache.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_datacache.vhd)):**
   - 32-bit GPR register file (`g_regs_32`) in MLAB under `ADDR32_ONLY`, saving half the MLAB cells and reducing routing congestion.
   - 32-bit arithmetic, address generation, and 32-bit barrel shifter paths (`calcResult_shiftL`/`calcResult_shiftR`), eliminating 65-bit shifter routing delays.
   - Decoupling of D-Cache write enables: `st_direct_we` prevents unclocked combinatorial writes in `IDLE` when `STORE_BUFFER` is active, completely eliminating the -4.18 ns critical path from `itagram` to `portbwe`.
   - Disconnected tag match dependency from `sb_drain_idle` (`sb_fwd_sel`), removing tag lookup from data RAM port b arbitration.
-  - `clk_core` (50 MHz) domain fully closed with positive slack of **+6.41 ns**.
-- **Physical Device Metrics (Cyclone V 5CEBA4F23C8):**
-  - **Logic Utilization (ALMs):** **17,372 / 18,480 (94%)** — the design fits comfortably.
-  - **Block Memory Bits:** **1,202,784 / 3,153,920 (38%)**.
-  - **DSP Blocks:** **21 / 66 (32%)**.
-  - **Generated Bitstream:** [`pocket_ki.rbf`](file:///PROCESOS/LittleInstinct/src/fpga/output_files/pocket_ki.rbf) (1.8 MB).
-  - **APF Release Package:** Ready for installation under [`Release/`](file:///PROCESOS/LittleInstinct/Release/) with bit-reversed [`bitstream.rbf_r`](file:///PROCESOS/LittleInstinct/Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r) and ready-to-extract ZIP archive.
+- **Physical Device Metrics (Cyclone V 5CEBA4F23C8), build v1.0.17:**
+  - **Logic Utilization (ALMs):** **18,230 / 18,480 (99%)**, **1,847 / 1,848 LABs**.
+  - **Block Memory Bits:** **1,525,344 / 3,153,920 (48%)**.
+  - **DSP Blocks:** **23 / 66 (35%)**.
+  - **Timing:** Completely closed for Hold (+0.120 ns worst-case) and Recovery (+15.387 ns); inter-PLL asynchronous clock groups and `set_false_path -from [get_keepers {*rst_sync[*]}]` established in [`pocket_ki.sdc`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/pocket_ki.sdc).
+  - **Generated Bitstream:** [`pocket_ki.rbf`](file:///PROCESOS/LittleInstinct/src/fpga/output_files/pocket_ki.rbf) (1.8 MB, MD5 `41d97ad4990f7bc034bceb74897ea77b`).
+  - **APF Release Package:** Synchronized to SD card under [`Release/`](file:///PROCESOS/LittleInstinct/Release/) with bit-reversed [`bitstream.rbf_r`](file:///PROCESOS/LittleInstinct/Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r) (MD5 `d66c296ca6624954ce65ff0b8ef95f33`) and ready-to-extract ZIP archive [`LittleInstinct_Pocket_v1.0.0.zip`](file:///PROCESOS/LittleInstinct/Release/LittleInstinct_Pocket_v1.0.0.zip).
+  - **Hardware status:** Ready for hardware testing on Analogue Pocket to verify SDRAM boot sequence (`SD:1`, `BOOT:1`, `RST:0`) and capture software departure telemetry (`EX`, `DO`, `DP:8802EC4C`).
 
 ## Layout
 
@@ -362,45 +363,6 @@ cp Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r /media/$U
 ```
 
 
-### 10. v1.0.11 — watchdog del disco y confirmación de arranque
-
-**Resultado en hardware de v1.0.10:** el arranque quedó resuelto. La pantalla de
-diagnóstico reporta `RST:0 BOOT:1 PLL:1 HDD:1 SD:1 RX:00480000 SB:00000800
-RDY:1 AT:3`. Es decir: la ROM completa (4,718,592 bytes) llegó a SDRAM, la CPU
-salió de reset, la placa de sonido responde lista y el juego alcanza a sonar el
-bip de inicio. El cargador ya no es el problema.
-
-Lo que queda es que el juego se cuelga **después** del bip, leyendo el disco
-(`AT:3` = `ATA_PIO_READ`, el CPU dejó de drenar el puerto de datos a mitad de
-sector).
-
-- **Bug encontrado: el watchdog del disco abortaba transferencias válidas.**
-  `pk_io` bajaba `sd_ack` por timeout a los **167.8 ms** (`disk_watchdog[23]`).
-  `ki_ata.sv` marca el banco como **válido en el flanco de bajada de `sd_ack`
-  sin comprobar cuántas palabras llegaron**:
-
-  ```systemverilog
-  if (fetch_busy && !sd_ack && sd_ack_d) begin
-    bank_valid[fill_bank] <= 1'b1;   // sin verificar disk_words_rem
-  ```
-
-  Un timeout temprano entrega al CPU un sector a medias como si estuviera
-  completo. El síntoma no es un timeout visible sino datos corruptos, que
-  parecen un cuelgue del juego. 167.8 ms es un valor alcanzable por la primera
-  lectura de una ranura diferida desde microSD (metadatos FAT, despertar de
-  tarjeta).
-- **Corrección:** el watchdog pasa a **2.68 s** (`disk_watchdog[27]`), que sigue
-  acotando un deadlock real pero queda fuera del rango de cualquier latencia
-  legítima de tarjeta. Se añadió `disk_timeout` como bandera pegajosa, visible
-  en el dígito más alto del campo `DK:` (bit 31).
-- El campo `DK:` mostraba solo 24 de sus 32 bits; los 8 bajos llevaban
-  `sd_lba[7:0]` de los que nunca se veían más de siete. Ese hueco ahora carga la
-  bandera.
-
-Cómo leer `DK` cuando el juego se cuelga leyendo disco: si el primer dígito
-hexadecimal es `8` o mayor, el watchdog actuó y la transferencia quedó truncada;
-si es `0`, el APF respondió normalmente y el cuelgue está en otra parte.
-
 ### 9. v1.0.10 — secuenciador de arranque, chord real y diagnóstico de carga
 
 El fallo observado en `IMG_20261111_180417.jpg` no era el detector de teclas: la
@@ -445,6 +407,12 @@ lectura `[12:9]`, `download_push[8]`, `download_pop[7]`, `sdram_done[6]`,
 `boot_download[5]`, `download_accept[4]`, relleno `[3:0]`. Los estados 16/17 son
 `DOWNLOAD_SDRAM_WRITE_ISSUE` / `_WAIT`.
 
+> La fila 10 **ya no muestra `DL`** desde v1.0.14: el cargador está resuelto y
+> la fila 10 ahora lleva `DO`, el opcode de la captura de salida (ver la sección
+> 11). `debug_download_info` sigue existiendo en el puente pero ya no se dibuja,
+> así que la síntesis lo elimina. La leyenda de bits de arriba describe `DL`
+> para builds ≤ v1.0.13.
+
 Cómo leer la pantalla cuando no arranca:
 
 - `SD:0` → el controlador SDRAM no salió de su secuencia de encendido. Si
@@ -460,12 +428,223 @@ Cómo leer la pantalla cuando no arranca:
   con la imagen parcial y el juego puede no arrancar, pero ya no queda en reset
   silencioso.
 
+### 10. v1.0.11 — watchdog del disco y confirmación de arranque
+
+**Resultado en hardware de v1.0.10:** el arranque quedó resuelto. La pantalla de
+diagnóstico reporta `RST:0 BOOT:1 PLL:1 HDD:1 SD:1 RX:00480000 SB:00000800
+RDY:1 AT:3`. Es decir: la ROM completa (4,718,592 bytes) llegó a SDRAM, la CPU
+salió de reset, la placa de sonido responde lista y el juego alcanza a sonar el
+bip de inicio. El cargador ya no es el problema.
+
+Lo que queda es que el juego se cuelga **después** del bip, leyendo el disco
+(`AT:3` = `ATA_PIO_READ`, el CPU dejó de drenar el puerto de datos a mitad de
+sector).
+
+- **Bug encontrado: el watchdog del disco abortaba transferencias válidas.**
+  `pk_io` bajaba `sd_ack` por timeout a los **167.8 ms** (`disk_watchdog[23]`).
+  `ki_ata.sv` marca el banco como **válido en el flanco de bajada de `sd_ack`
+  sin comprobar cuántas palabras llegaron**:
+
+  ```systemverilog
+  if (fetch_busy && !sd_ack && sd_ack_d) begin
+    bank_valid[fill_bank] <= 1'b1;   // sin verificar disk_words_rem
+  ```
+
+  Un timeout temprano entrega al CPU un sector a medias como si estuviera
+  completo. El síntoma no es un timeout visible sino datos corruptos, que
+  parecen un cuelgue del juego. 167.8 ms es un valor alcanzable por la primera
+  lectura de una ranura diferida desde microSD (metadatos FAT, despertar de
+  tarjeta).
+- **Corrección:** el watchdog pasa a **2.68 s** (`disk_watchdog[27]`), que sigue
+  acotando un deadlock real pero queda fuera del rango de cualquier latencia
+  legítima de tarjeta. Se añadió `disk_timeout` como bandera pegajosa, visible
+  en el dígito más alto del campo `DK:` (bit 31).
+- El campo `DK:` mostraba solo 24 de sus 32 bits; los 8 bajos llevaban
+  `sd_lba[7:0]` de los que nunca se veían más de siete. Ese hueco ahora carga la
+  bandera.
+
+Cómo leer `DK` cuando el juego se cuelga leyendo disco: si el primer dígito
+hexadecimal es `8` o mayor, el watchdog actuó y la transferencia quedó truncada;
+si es `0`, el APF respondió normalmente y el cuelgue está en otra parte.
+
+### 11. v1.0.14 — captura de salida (DP/DO) en lugar de la captura de reinicio
+
+**Dato de partida:** dos corridas en hardware (v1.0.12 y v1.0.13) leyeron
+`V:0` en la fila 14, es decir, el capturador de reinicio **nunca disparó**. Su
+condición de disparo era un flanco de subida de `cpu_reset`, así que el dato
+significa:
+
+> **Ningún término de `cpu_reset` se activó después del arranque.** El juego no
+> se reinicia por hardware.
+
+Eso cierra esa línea, pero deja la pregunta original sin responder: un juego
+puede reiniciarse **por software**, sin reset alguno, saltando fuera de su
+programa descomprimido. Ese camino no deja rastro en ningún contador de reset
+ni en ninguna fila de la pantalla de diagnóstico. La captura de reinicio no
+podía verlo por construcción.
+
+**Corrección:** en vez de capturar el reset, se captura la salida misma, dentro
+de la CPU, donde el decode es visible. `cpu_pocket.vhd` engancha el último PC
+ejecutado del programa descomprimido (`0x88xxxxxx`) y el disparador, que puede
+ser uno de dos:
+
+- `01` — salto al boot ROM: un camino de error o de watchdog.
+- `10` — salto directo de vuelta a `0x88000000`, sin boot ROM en medio.
+
+Se arma con el salto, no con un reset, así que dispara exactamente en el caso
+que la captura anterior no podía ver.
+
+**No cuesta página ni bits nuevos de snapshot.** La captura ocupa dos filas que
+la pantalla ya tenía:
+
+- **`DP:` (fila 14)** — el último PC ejecutado del programa descomprimido. Antes
+  era `RP`, el PC del reinicio que nunca se capturó.
+- **`DO:` (fila 10)** — el opcode **una decodificación anterior** a `DP`. Esto
+  importa para leerlo: si la salida fue un salto, esa decodificación es la rama
+  misma y `DP` es su **delay slot** (la última instrucción que el programa
+  ejecutó). Así, lo normal es `DO` = `jr`/`jalr`/`j` y `DP` = `dirección de la
+  rama + 4`. Si `DO` no es un salto, entonces `DP` es la última instrucción que
+  llegó a ejecutarse antes de la excepción.
+  Antes esa fila mostraba `DL`, la FSM de descarga del puente; el cargador está
+  resuelto desde v1.0.10 (`RX:00480000`, `BOOT:1`) y la fila 11 ya informa
+  estado de loader, timeout y aborto.
+- **`V:` (fila 14, col. 14)** — hubo captura o no. Leer esto **primero**.
+- **`C:` (fila 14, col. 18-19)** — el disparador: `01` o `10`.
+
+**Cómo leerlo cuando el juego se cuelga después del bip:**
+
+- `V:0` → el juego **no** se reinició ni saltó. Está colgado. Mirar `PC` (fila
+  4), `RDY` (fila 7) y el disco (fila 13).
+- `V:1`, `C:01` → saltó al boot ROM. `DO` nombra la instrucción: un `jr`/`j` es
+  el juego reiniciándose a propósito.
+- `V:1`, `C:10` → volvió directo a `0x88000000`. `DP`/`DO` dicen desde dónde y
+  con qué.
+- `V:1` **no** prueba por sí solo un reinicio: el juego puede llamar al boot ROM
+  legítimamente y esa transición también se captura. El contador independiente
+  es `RC` (fila 12): el par bajo cuenta ejecuciones de `0x88000000` (el arranque
+  es exactamente 1) y los dígitos 4-7 cuentan transiciones RAM → boot ROM. Si el
+  juego corre sano con `V:1 C:01` y `RC` estable, fue una llamada, no un
+  reinicio; si `RC` sube, se reinició.
+
+La página ya **no** necesita el chord Start+Select para verse: `DP`/`DO` están
+en las filas normales de estado.
+
+**Fit de este build** (Quartus 25.1 Lite, `5CEBA4F23C8`, `pocket_ki.rbf`
+`18df93f94d71a2ecfcf183b6148c465f`):
+
+- ALMs **18.277 / 18.480 (99 %)**, LABs **1847 / 1848**, registros 17.652.
+- Peor camino de setup: **−3,56 ns** en `clk_core`, íntegramente dentro del cono
+del `adsp2105` (ver abajo). Ningún nodo de la captura nueva está en
+ese camino; es la deuda del DSP ya documentada abajo, y el número varía entre
+colocaciones del fitter (−2,2 a −3,6 ns en el mismo diseño).
+
+**Pendiente de verificación en hardware.** El bitstream compila, entra en el
+dispositivo y el paquete `Release/` está generado y verificado (el `.rbf_r`
+es el bit-reverse exacto del `.rbf`), pero esta pasada **no** se ha probado en
+consola. Lo que hay que reportar de la próxima corrida es la fila 10 (`DO`), la
+fila 14 (`DP`, `V`, `C`) y la fila 12 (`RC`).
+
+**Tres tropiezos de esta pasada, registrados para no repetirlos:**
+
+1. La primera versión puso la captura en una página nueva reutilizando el
+   renderer del trace. Costó 414 registros en `ki_debug_screen` y el fit falló
+   por 4 LABs (1852 necesarios). Un renderer de 64 bits por fila no cabe en este
+   dispositivo; la captura cupo sólo cuando se metió en filas existentes.
+2. El cruce a `clk_core` se hizo primero con dos flops por bit sobre los 64 bits
+   del payload: 0,5 ns de `clk_core` a cambio de nada. Los registros del payload
+   los mantiene la CPU desde la salida hasta la siguiente, así que sólo el
+   strobe necesita sincronizarse; el payload se engancha cuando el strobe llega.
+3. Los registros nuevos se limpiaban en dos procesos `clk93` distintos y Quartus
+   lo rechaza (`Can't resolve multiple constant drivers`). Se movieron al mismo
+   proceso que los escribe, que es el que ya documentaba esa trampa para
+   `debug_ret_count_register`.
+
 ---
 
-## Estado al 2026-11-11 (punto de continuación)
+### 12. v1.0.15 — DO corregido y la causa de excepción en pantalla
+
+**Medido en hardware con v1.0.14** (dos capturas a 12 s de distancia,
+`IMG_20261112_105159.jpg` / `IMG_20261112_105211.jpg`):
+
+```
+RST:0 BOOT:1 SD:1 L3        PLL:1 HDD:1 VB creciendo
+ERR:00 I:00000000 V:1       PC:88020D08  TR:00006
+RX:00480000 DK:021000       N:4859465E  EC:00 SD:P
+SB:00000800 RDY:1           DO:90CFD01F
+BF:00006173 AU:05C00        RC:02030001
+AT:0 SR:50 ER:00            DP:8802EC4C  V:1 C:01
+```
+
+Lo que confirman esas dos fotos:
+
+- **La captura de salida funciona.** `V:1 C:01` con `DP:8802EC4C`: el programa
+  del juego salió hacia el boot ROM desde esa dirección. No es un reset.
+- **Hay exactamente un reinicio.** Tres cuentas independientes coinciden:
+  `RC` entradas a `0x88000000` = **2** (el arranque es 1), `RC` transiciones
+  RAM→boot ROM = **1**, y `C:01` disparado.
+- **La pantalla azul no es "sin framebuffer".** En `ki_core_pocket.sv`, si
+  `fb_write_seen` es 0 el video sale **negro**, no azul. Azul significa que la
+  CPU escribió el framebuffer: el juego llegó a pintar.
+- **Todo lo demás está limpio:** `SD:P` con `EC:00` (autotest de SDRAM sin
+  errores en ambas mitades), `DK:021000` (disco ocioso, ranura diferida
+  completada, watchdog sin disparar), `AT:0 SR:50 ER:00` (ATA idle sin error),
+  `BF:00006173` con `boot_state=3` (cadena de arranque entera), `AU:05C00`
+  (primer audio en la unidad 92 y **cero** discontinuidades de muestra), y
+  `N:4859465E` = 1.212.540.510 instrucciones retiradas.
+
+#### El defecto que tenía mi propia instrumentación
+
+`DO` no era la instrucción en `DP`. La cadena, contada en ciclos:
+
+- Durante el ciclo N, `debug_fetch_pc_register` contiene `P(N-1)`,
+  `debug_prev_op_live` contiene `O(N-1)` y `hist_op1` contiene `O(N-2)`.
+- El test de salida exige que el **viejo** `debug_fetch_pc_register` esté en
+  `0x88xxxxxx` y que `PCold1` esté en el boot ROM, así que la dirección de
+  salida es `P(N-1)` — lo que se guarda en `debug_dep_pc_register`.
+- Por lo tanto el opcode **en** esa dirección es `debug_prev_op_live`.
+  `hist_op1` está **dos** decodificaciones atrás y no describe nada útil; venía
+  heredado de upstream.
+
+Por eso `DO:90CFD01F` decodificaba como `LWC2` (`opcode 0x24`), que no tiene
+sentido en KI. Corregido en v1.0.15: ahora `DO` es el opcode en `DP`.
+
+#### `EX`: la causa de la excepción, en la fila 8
+
+`debug_exc_cause` se capturaba en el CPU desde v1.0.14 pero estaba cableado a
+nada. Ahora ocupa la fila 8, que mostraba `RS` (contadores de reset que leen
+`00000000` en toda corrida desde que se retiró la captura de reset, o sea una
+fila muerta).
+
+`ExcCode` está en los bits 6:2:
+
+- `00000004` AdEL · `00000014` AdES · `00000020` Sys · `00000028` RI
+- `00000000` Int (es la forma de un vblank) · `1C/2C/30/34` fallos TLB
+
+`RI` es el valor interesante: una instrucción reservada en `DP` significa que
+el core ejecutó código que no debía, o decodificó mal una palabra, y el manejador
+de excepción manda el control al boot ROM — que es exactamente lo que
+`DP/V/C` reportan.
+
+`EX` se captura **sólo** en el camino `01`. En el camino `10` conserva el último
+valor del `01` anterior, por eso hay que leer `C:` junto con `EX:`.
+
+**Fit de v1.0.15** (Quartus 25.1 Lite, `5CEBA4F23C8`):
+
+- ALMs **18.297 / 18.480 (99 %)**, **LABs 1848 / 1848**, registros 17.650.
+- Peor camino: **−2,30 ns**, de nuevo `mstat[0] → banco G0 → ALU → astat[6]`
+  dentro del `adsp2105`. Ningún nodo de `DO`/`EX` está en él.
+- `pocket_ki.rbf` MD5 `d9e3c4a3a7d8083c2e41c7c53add254c`.
+
+**Sin verificar en consola todavía.** Lo que hay que leer en la próxima corrida
+es `EX:` (fila 8) junto con `DP:`/`DO:` (fila 14 y fila 10).
+
+---
+
+## Estado al 2026-11-12 (punto de continuación)
 
 Esta sección existe para retomar el trabajo sin reconstruir el contexto. Todo lo
-que sigue está medido en hardware real, no inferido.
+que sigue está medido en hardware real, no inferido, salvo lo que se marca
+explícitamente como pendiente.
 
 ### Lo que funciona, verificado en consola
 
@@ -487,46 +666,34 @@ RST:0  BOOT:1  PLL:1  HDD:1  SD:1  RX:00480000  RDY:1
 Síntoma: tras el bip la pantalla queda azul y el juego vuelve a su secuencia de
 inicio; a veces se observa `AT:3`.
 
-**Último dato medido:** `V:0` y `RP:0` en la fila 14 (página V164).
+**Lo que ya está descartado por medición:** el reinicio **no** es un reset de
+hardware (`V:0` en dos corridas), y el cargador, el watchdog del disco y las
+lecturas SDRAM están limpios (ver "Descartado con evidencia").
 
-`V` es el bit de captura válida. `V:0` significa que **el capturador de reinicio
-nunca disparó**, y su condición de disparo es un flanco de subida de
-`cpu_reset`. Por lo tanto, con alta confianza:
-
-> **El reinicio NO es un reset de hardware.** Ninguno de los términos de
-> `cpu_reset` (PLL, SDRAM, boot_loaded, self test, RESET del APF, shell reset,
-> loader o menú) se activó después del arranque.
-
-Esto descarta la línea de investigación de "algo resetea el core". Encaja con lo
-que el propio diseño ya sabía documentar: el juego puede reiniciarse **solo**,
-por software, saltando de nuevo a `0x88000000` o al boot ROM. El campo `RC`
-(fila 12) existe precisamente para contar eso:
-
-- dígitos 0-1: ejecuciones de `0x88000000` — el arranque es exactamente 1, dos o
-  más significa que el juego se re-invocó a sí mismo.
-- dígitos 2-3: comandos ATA `INITIALIZE DEVICE PARAMETERS` — el arranque emite
-  exactamente dos.
-- dígitos 4-7: transiciones RAM → boot ROM.
+**Lo que cambia en v1.0.15:** hay instrumentación para el camino
+que queda vivo, el reinicio **por software**. Hasta ahora `DP:` y `DO:` estaban
+cableados a cero en el port Pocket; ahora son una captura real.
 
 ### Próximo paso concreto (empezar aquí)
 
-1. Con la página V164 visible, leer y anotar:
-   - **`RC:`** (fila 12) — el discriminador principal. `RC:01xx....` con el
-     primer par > 1 confirma re-inicio por software.
-   - **`PC:`** (fila 4) — dónde está la CPU ahora.
-   - **`TR:`** (fila 4, columnas 12-19) — decodificaciones del tope del bucle.
-   - **`SB:...RDY:`** (fila 7) — si `RDY` cayó a 0, el juego está esperando a la
-     placa de sonido y el problema es el ADSP, no el reinicio.
-2. Según el resultado:
-   - Si `RC` muestra más de una entrada en `0x88000000` → el juego se reinicia
-     por software. Instrumentar el motivo: capturar el PC y el opcode en la
-     transición RAM → boot ROM (`DP:`/`DO:` ya existen para esto en MiSTer pero
-     están cableados a cero en el port Pocket).
-   - Si `RC` sigue en 1 y `PC` está clavado en la misma dirección → el juego no
-     se reinicia, se **cuelga**, y lo que se ve es la pantalla congelada.
-   - Si `RDY:0` → prioridad al ADSP (ver deuda técnica abajo).
+1. Instalar el build v1.0.15 en la microSD y llegar hasta el cuelgue tras el bip.
+2. Leer la pantalla de estado y anotar, en este orden:
+   - **`V:`** (fila 14, col. 14) — ¿hubo captura?
+   - **`C:`** (fila 14, col. 18-19) — `01` boot ROM, `10` vuelta a `0x88000000`.
+   - **`DP:`** (fila 14) y **`DO:`** (fila 10) — desde dónde saltó y con qué
+     instrucción.
+   - **`RC:`** (fila 12) — el contador independiente de reentradas.
+   - **`PC:`** (fila 4) y **`RDY:`** (fila 7) — dónde está ahora y si espera al
+     DSP.
+3. Según el resultado:
+   - `V:1` → el juego se reinicia por software y ya se sabe desde qué dirección y
+     con qué instrucción. Toca leer el código del juego en esa dirección (dump de
+     `kinst.rom`) para saber por qué rama de error entró.
+   - `V:0` con `PC` clavado → no se reinicia, se **cuelga**. Comparar `PC` con el
+     rango del bucle y mirar `RDY` y `AT`/`SR`/`ER` del disco.
+   - `RDY:0` → prioridad al ADSP (ver deuda técnica abajo), no al reinicio.
 
-### Bugs propios encontrados y corregidos en esta sesión
+### Bugs propios encontrados y corregidos en sesiones anteriores
 
 Vale registrarlos porque dos de ellos costaron ciclos de compilación y uno
 produjo un diagnóstico falso:
@@ -539,7 +706,7 @@ produjo un diagnóstico falso:
    hallazgo.
 2. **Falta de bit de validez.** Sin `V`, un `CA:00` es ambiguo entre "ningún
    término estaba activo" y "no se capturó nada". Ahora `V` se muestra antes de
-   `CA` por esa razón.
+   `C` por esa razón.
 3. **Contador de stall de 28 bits** que hizo fallar el fit por exactamente 1 LAB
    (1849 necesarios, 1848 disponibles). Se reescribió contando frames: 7
    registros en lugar de 28.
@@ -548,6 +715,9 @@ produjo un diagnóstico falso:
    controlador muestrea, y el pipeline avanzaba en ambos flancos. Los tres eran
    defectos del banco, no del diseño. Están documentados en
    `tests/sim/sdram_model.sv` para no repetirlos.
+5. **Captura de salida demasiado ancha** (v1.0.14). Ver el punto 11 arriba: una
+   página nueva con renderer de 64 bits no cabe, y sincronizar 64 bits con dos
+   flops por bit cuesta 0,5 ns de `clk_core` sin ganar nada.
 
 ### Descartado con evidencia (no volver a investigar)
 
@@ -558,22 +728,27 @@ produjo un diagnóstico falso:
 - **Lecturas SDRAM corruptas.** `tests/sim/tb_readback.sv` escribe un patrón por
   el puerto del CPU y lo lee de vuelta: **512/512 palabras íntegras**. El puente
   preserva datos, orden, byte enables y mapeo de filas.
-- **Reset de hardware tras el arranque.** `V:0`, ver arriba.
+- **Reset de hardware tras el arranque.** `V:0` en dos corridas (v1.0.12 y
+  v1.0.13). Ningún término de `cpu_reset` se activó después del arranque.
 
 ### Deuda técnica abierta (la mayor incógnita de fondo)
 
-`clk_core` **no cierra**: −2,23 ns. Los 40 peores caminos están **todos** en el
-cono heredado del `adsp2105`:
+`clk_core` **no cierra**. En el build v1.0.15 el peor camino es **−2,30 ns** y
+está **entero** dentro del cono heredado del `adsp2105`:
 
 ```
-mstat[0] -> bnk -> banco de registros G0 -> ALU -> astat[6]
+mstat[0] -> G0 register bank -> ALU -> astat[6]
 ```
 
-`wire bnk = mstat[0]` (línea 129 de `adsp2105_pocket.sv`) selecciona banco de
-registros y de ahí sale un cono largo hasta los flags. El diseño está al **99%
-de ALMs**, así que cerrarlo exige reestructurar el DSP, no añadir constraints.
+`mstat[0]` selecciona banco de registros y de ahí sale un cono largo hasta los
+flags. El número oscila entre −2,2 y −3,6 ns según la colocación del fitter en el
+mismo RTL, así que la tendencia entre builds no es señal por sí sola: lo que
+importa es que el camino más lento es siempre el mismo y no es de la CPU ni del
+video. Con el diseño al **99 % de ALMs y 1848/1848 LABs**, cerrarlo exige
+reestructurar el DSP (partir el MAC en dos ciclos, por ejemplo), no añadir
+constraints, y no hay espacio para la lógica extra sin quitar algo más.
 
-Que el bip suene **no** prueba que el ADSP sea correcto: un colchón de −2,23 ns
+Que el bip suene **no** prueba que el ADSP sea correcto: un colchón de −3,6 ns
 puede producir audio con glitches o un DSP que responde a medias. Si `RDY` cae a
 0 durante el cuelgue, esta es la causa.
 
@@ -593,5 +768,11 @@ cd ../.. && python3 tools/package_pocket.py
 tests/sim/run.sh
 ```
 
-Estado del árbol: `master` == `origin/master`, build v1.0.13, página **V164**,
-bitstream `2c209ca86cfafc7fff7609de02c4fdbb` en la microSD.
+Los bancos de `tests/sim/` **no** se pudieron ejecutar en esta pasada porque
+`iverilog` no está instalado en esta máquina; el análisis y la síntesis de
+Quartus sí corrieron, y son los que validan la sintaxis y la elaboración.
+
+Estado del árbol: build **v1.0.16**, página de estado **V165**, bitstream
+`d6f7e7d5e4944526d20bf5188e16d6c0` (`Release/.../bitstream.rbf_r`
+`3a5c2a462b8432d685607a6a7e152f67`). **Listo para prueba en consola.**
+
