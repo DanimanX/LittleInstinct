@@ -459,3 +459,139 @@ Cómo leer la pantalla cuando no arranca:
 - `BF` con el bit 12 (`timeout`) → el watchdog de 8 s actuó; la CPU se libera
   con la imagen parcial y el juego puede no arrancar, pero ya no queda en reset
   silencioso.
+
+---
+
+## Estado al 2026-11-11 (punto de continuación)
+
+Esta sección existe para retomar el trabajo sin reconstruir el contexto. Todo lo
+que sigue está medido en hardware real, no inferido.
+
+### Lo que funciona, verificado en consola
+
+El arranque está **resuelto**. La cadena completa opera:
+
+```
+RST:0  BOOT:1  PLL:1  HDD:1  SD:1  RX:00480000  RDY:1
+```
+
+- La ROM completa (`0x480000` = 4.718.592 bytes) llega a SDRAM.
+- La CPU sale de reset y ejecuta el POST de memoria (relleno vertical de
+  pantalla).
+- El juego reproduce su bip de inicio: la placa DCS responde y se deja mandar.
+- El disco responde: `AT:0`, `DK:021000` decodifica `dataslot_done=1`,
+  `disk_active=0`, `disk_words_rem=0`, `disk_timeout=0`.
+
+### Lo que queda: el juego no llega a la demo
+
+Síntoma: tras el bip la pantalla queda azul y el juego vuelve a su secuencia de
+inicio; a veces se observa `AT:3`.
+
+**Último dato medido:** `V:0` y `RP:0` en la fila 14 (página V164).
+
+`V` es el bit de captura válida. `V:0` significa que **el capturador de reinicio
+nunca disparó**, y su condición de disparo es un flanco de subida de
+`cpu_reset`. Por lo tanto, con alta confianza:
+
+> **El reinicio NO es un reset de hardware.** Ninguno de los términos de
+> `cpu_reset` (PLL, SDRAM, boot_loaded, self test, RESET del APF, shell reset,
+> loader o menú) se activó después del arranque.
+
+Esto descarta la línea de investigación de "algo resetea el core". Encaja con lo
+que el propio diseño ya sabía documentar: el juego puede reiniciarse **solo**,
+por software, saltando de nuevo a `0x88000000` o al boot ROM. El campo `RC`
+(fila 12) existe precisamente para contar eso:
+
+- dígitos 0-1: ejecuciones de `0x88000000` — el arranque es exactamente 1, dos o
+  más significa que el juego se re-invocó a sí mismo.
+- dígitos 2-3: comandos ATA `INITIALIZE DEVICE PARAMETERS` — el arranque emite
+  exactamente dos.
+- dígitos 4-7: transiciones RAM → boot ROM.
+
+### Próximo paso concreto (empezar aquí)
+
+1. Con la página V164 visible, leer y anotar:
+   - **`RC:`** (fila 12) — el discriminador principal. `RC:01xx....` con el
+     primer par > 1 confirma re-inicio por software.
+   - **`PC:`** (fila 4) — dónde está la CPU ahora.
+   - **`TR:`** (fila 4, columnas 12-19) — decodificaciones del tope del bucle.
+   - **`SB:...RDY:`** (fila 7) — si `RDY` cayó a 0, el juego está esperando a la
+     placa de sonido y el problema es el ADSP, no el reinicio.
+2. Según el resultado:
+   - Si `RC` muestra más de una entrada en `0x88000000` → el juego se reinicia
+     por software. Instrumentar el motivo: capturar el PC y el opcode en la
+     transición RAM → boot ROM (`DP:`/`DO:` ya existen para esto en MiSTer pero
+     están cableados a cero en el port Pocket).
+   - Si `RC` sigue en 1 y `PC` está clavado en la misma dirección → el juego no
+     se reinicia, se **cuelga**, y lo que se ve es la pantalla congelada.
+   - Si `RDY:0` → prioridad al ADSP (ver deuda técnica abajo).
+
+### Bugs propios encontrados y corregidos en esta sesión
+
+Vale registrarlos porque dos de ellos costaron ciclos de compilación y uno
+produjo un diagnóstico falso:
+
+1. **Captura de reinicio que se borraba sola** (v1.0.12 → v1.0.13). El término
+   `if (core_reset) debug_reboot_valid <= 0;` estaba *después* de la captura en
+   el mismo `always`. En Verilog gana la última asignación no bloqueante, así
+   que todo reinicio por `core_reset` borraba su propia captura en el mismo
+   ciclo. El reporte `RP:00 CA:00` de esa versión era este defecto, no un
+   hallazgo.
+2. **Falta de bit de validez.** Sin `V`, un `CA:00` es ambiguo entre "ningún
+   término estaba activo" y "no se capturó nada". Ahora `V` se muestra antes de
+   `CA` por esa razón.
+3. **Contador de stall de 28 bits** que hizo fallar el fit por exactamente 1 LAB
+   (1849 necesarios, 1848 disponibles). Se reescribió contando frames: 7
+   registros en lugar de 28.
+4. **Modelo SDRAM del testbench**, equivocado en tres versiones sucesivas:
+   devolvía `z` en cada lectura, se relojó en el mismo flanco en que el
+   controlador muestrea, y el pipeline avanzaba en ambos flancos. Los tres eran
+   defectos del banco, no del diseño. Están documentados en
+   `tests/sim/sdram_model.sv` para no repetirlos.
+
+### Descartado con evidencia (no volver a investigar)
+
+- **Carga de ROM / cargador.** `RX:00480000` completo, `BOOT:1`.
+- **Watchdog del disco abortando transferencias.** `disk_timeout=0`; la ranura
+  diferida completó limpia. Se subió igual el timeout de 167,8 ms a 2,68 s
+  porque el valor viejo era peligrosamente bajo, pero no era la causa.
+- **Lecturas SDRAM corruptas.** `tests/sim/tb_readback.sv` escribe un patrón por
+  el puerto del CPU y lo lee de vuelta: **512/512 palabras íntegras**. El puente
+  preserva datos, orden, byte enables y mapeo de filas.
+- **Reset de hardware tras el arranque.** `V:0`, ver arriba.
+
+### Deuda técnica abierta (la mayor incógnita de fondo)
+
+`clk_core` **no cierra**: −2,23 ns. Los 40 peores caminos están **todos** en el
+cono heredado del `adsp2105`:
+
+```
+mstat[0] -> bnk -> banco de registros G0 -> ALU -> astat[6]
+```
+
+`wire bnk = mstat[0]` (línea 129 de `adsp2105_pocket.sv`) selecciona banco de
+registros y de ahí sale un cono largo hasta los flags. El diseño está al **99%
+de ALMs**, así que cerrarlo exige reestructurar el DSP, no añadir constraints.
+
+Que el bip suene **no** prueba que el ADSP sea correcto: un colchón de −2,23 ns
+puede producir audio con glitches o un DSP que responde a medias. Si `RDY` cae a
+0 durante el cuelgue, esta es la causa.
+
+Hallazgo adicional de constraints: el SDC declara asíncronos
+`general[0]`↔`general[1]`, pero **no** cubre el cruce `u_pll` (PLL del APF) →
+`general[1]` (PLL del core). Aparece un camino de −3,8 ns por ahí. No se tocó
+porque declarar asíncrono un cruce que no está sincronizado podría esconder un
+bug real; hay que verificar primero si esos dos relojes comparten referencia.
+
+### Reproducir el entorno
+
+```bash
+export PATH=/opt/intelFPGA/25.1/quartus/bin:$PATH
+cd src/fpga && quartus_sh --flow compile pocket_ki
+cd ../.. && python3 tools/package_pocket.py
+# bancos de simulación (Icarus Verilog 11+)
+tests/sim/run.sh
+```
+
+Estado del árbol: `master` == `origin/master`, build v1.0.13, página **V164**,
+bitstream `2c209ca86cfafc7fff7609de02c4fdbb` en la microSD.
