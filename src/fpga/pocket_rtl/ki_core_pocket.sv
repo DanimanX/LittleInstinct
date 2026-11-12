@@ -173,7 +173,7 @@ localparam CONF_STR = {
 `endif
 	"R0,Reset;",
 	"J1,High Quick,High Medium,High Fierce,Low Quick,Low Medium,Low Fierce,Start,Coin,Service,Test,Pause;",
-	"V,1.62"
+	"V,1.63"
 };
 
 wire [1:0] buttons;
@@ -914,30 +914,45 @@ reg debug_cpu_reset_d = 1'b1;
 //
 // Armed only after boot_ready has been high at least once, so the power-on
 // reset it is waiting behind cannot be confused with the reboot.
+//
+// THIS BLOCK HAD A BUG, and the first hardware report (RP:00 CA:00) was its
+// signature, not a finding: the "clear on core_reset" term sat AFTER the
+// capture in the same always block, and in Verilog the last nonblocking
+// assignment wins. Every reboot caused by core_reset therefore cleared its own
+// capture in the cycle it was taken, leaving both fields at their reset values.
+// The capture is now sticky: it records the FIRST reboot after boot and is
+// only re-armed by a fresh power-on (boot_seen_once for the next run).
+//
+// The PC comes from a one-cycle shadow rather than from debug_cpu_pc_sync
+// directly, because that sync register is zeroed by shell_reset in another
+// block and would report 0x00000000 for exactly the resets worth explaining.
+reg [31:0] debug_pc_prev      = 32'h0000_0000;
 reg [31:0] debug_reboot_pc    = 32'h0000_0000;
-reg  [5:0] debug_reboot_cause = 6'd0;
+reg  [7:0] debug_reboot_cause = 8'd0;
 reg        debug_reboot_valid = 1'b0;
 reg        boot_seen_once     = 1'b0;
 
 always @(posedge clk_core) begin
+	debug_pc_prev <= debug_cpu_pc_sync;
+
 	if (boot_ready)
 		boot_seen_once <= 1'b1;
 
+	// Sticky for the whole run once taken.
 	if (cpu_reset && !debug_cpu_reset_d && boot_seen_once && !debug_reboot_valid) begin
-		debug_reboot_pc <= debug_cpu_pc_sync;
+		debug_reboot_pc <= debug_pc_prev;
 		debug_reboot_cause <= {
-			shell_reset,        // bit 5  APF/OSD/menu reset or PLL loss
+			buttons[1],         // bit 7  APF menu / interact reset
+			core_reset,         // bit 6  core_reset asserted
+			shell_reset,        // bit 5  shell reset term
 			ioctl_download,     // bit 4  the loader restarted the stream
 			~boot_loaded,       // bit 3  boot_loaded dropped
 			~sdram_ready,       // bit 2  SDRAM controller left ready
-			~bist_done,         // bit 1  self test restarted
+			RESET,              // bit 1  the APF held RESET
 			~pll_locked         // bit 0  core PLL unlocked
 		};
 		debug_reboot_valid <= 1'b1;
 	end
-
-	if (core_reset)
-		debug_reboot_valid <= 1'b0;
 end
 reg debug_ioctl_download_d = 1'b0;
 // Reset provenance is retained across the resets it records:
@@ -1738,7 +1753,8 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_ret_count(debug_restart_info),
 		.cpu_ret_pc(debug_loader_summary),
 		.pcm_health(dcs_pcm_health),
-		.pcm_level({26'd0, debug_reboot_cause}),
+		// {23 unused, capture-valid, 8 cause bits} - the page reads bit 8 as V.
+		.pcm_level({23'd0, debug_reboot_valid, debug_reboot_cause}),
 		.cpu_response_status(32'd0),
 		.reset_info(debug_reset_info),
 		.reset_first(debug_reset_first),

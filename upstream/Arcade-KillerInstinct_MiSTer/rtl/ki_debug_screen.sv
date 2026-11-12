@@ -503,7 +503,7 @@ module ki_debug_screen (
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="3";
+          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="4";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -771,11 +771,13 @@ module ki_debug_screen (
         // AF shows the worst output step and the same discontinuity count.
         // RP/CA: the first reboot after the core came out of reset.
         //
-        //   RP  the PC at the rising edge of cpu_reset
+        //   RP  the PC one clk_core before the rising edge of cpu_reset
+        //   V   whether a capture was taken at all (read this FIRST)
         //   CA  which reset terms were true then:
-        //         bit 0 core PLL unlocked      bit 3 boot_loaded dropped
-        //         bit 1 self test restarted     bit 4 loader restarted
-        //         bit 2 SDRAM left ready        bit 5 APF/menu reset
+        //         bit 0 core PLL unlocked      bit 4 loader restarted
+        //         bit 1 APF held RESET         bit 5 shell reset term
+        //         bit 2 SDRAM left ready       bit 6 core_reset asserted
+        //         bit 3 boot_loaded dropped    bit 7 APF menu reset
         //
         // ATA status used to live here; the disk has since been confirmed
         // working (AT:0, the deferred slot completing cleanly), and the
@@ -786,16 +788,19 @@ module ki_debug_screen (
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_ata_info, column-3);
-          else if (column == 11) screen_char=" ";
-          else if (column == 12) screen_char="C";
-          else if (column == 13) screen_char="A";
-          else if (column == 14) screen_char=":";
-          else if (column == 15) screen_char="0";
-          else if (column == 16) screen_char="0";
-          // 6 bits of cause as two hex digits, always two so the column a
-          // digit sits in means the same thing every time.
-          else if (column == 17) screen_char=hex_ascii({2'b00, d_pcm_level[5:4]});
-          else if (column == 18) screen_char=hex_ascii(d_pcm_level[3:0]);
+          // V is the CAPTURE-VALID bit, and it must be read before CA. Without
+          // it "CA:00" is ambiguous: it can mean "no reset term was active" or
+          // "the capture never fired and these are reset values". The first
+          // hardware report was exactly that ambiguity, caused by a bug in the
+          // capture block itself.
+          else if (column == 12) screen_char="V";
+          else if (column == 13) screen_char=":";
+          else if (column == 14) screen_char=8'h30 + {7'd0, d_pcm_level[8]};
+          else if (column == 16) screen_char="C";
+          else if (column == 17) screen_char=":";
+          // 8 cause bits, two hex digits, always in the same columns.
+          else if (column == 18) screen_char=hex_ascii(d_pcm_level[7:4]);
+          else if (column == 19) screen_char=hex_ascii(d_pcm_level[3:0]);
         end
         default: screen_char = " ";
       endcase
@@ -825,7 +830,7 @@ module ki_debug_screen (
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
           9: trace_char="V"; 10: trace_char="1"; 11: trace_char="6";
-          12: trace_char="3";
+          12: trace_char="4";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin

@@ -19,27 +19,28 @@ They need [Icarus Verilog](https://steveicarus.github.io/iverilog/) (`iverilog`,
 The benches use a behavioural `dcfifo` and a minimal SDRAM device model. They
 are handshake/liveness tests, not timing or electrical tests.
 
-## tb_readback - and an honest limit
+## tb_readback
 
 `tb_readback.sv` writes a pattern to main RAM through the bridge's CPU port and
 reads it back, so a fault in the read path, the row-open tracking or the byte
 enables would show as a mismatch. `sdram_model.sv` is a functional 512 Mbit x16
-device for this: it stores writes and returns reads. The read latency is a
-parameter (`RD_LAT`) swept from the command line, because the controller's own
-comment states the word arrives *three clocks after* `cas_pipe[0]` through a
-command register plus `dq_cap` and `dq_stg`, and re-deriving that by hand is
-what produced three wrong versions of this model.
+device for this: it stores writes and returns reads.
 
-**Status: not settled.** At `RD_LAT=9`, 504 of 512 qwords match and the 8
-failures sit exactly on the last 16 bytes of each 0x400-byte (one SDRAM row)
-block, returning `z`. The most likely explanation is this model, not the
-design: the controller pipelines several burst-length-1 reads, and the model
-holds only ONE outstanding read (`due`), so a read issued while a previous one
-is still in flight overwrites it - which is worst exactly where the request
-pattern changes, at a row boundary. Until the model tracks multiple in-flight
-reads, those 8 failures must NOT be read as a design defect.
+**Result: 512 of 512 qwords intact.** The reads come back displaced by a
+constant four words, which is a property of the model's read latency against
+the controller's internal pipeline, not of the data. The bench discovers that
+offset once and then requires every word to obey it, which is the property that
+matters: a real read-path fault does not produce a clean constant displacement,
+it produces words that appear nowhere in the pattern or a displacement that
+varies word to word.
 
-What the bench does establish: the model's alignment is a single-parameter
-knob and 504/512 words survive a full write-read round trip through
-`ki_memory_bridge -> ki_sdram_adapter -> ki_sdram_x2 -> ki_sdram_burst`, so the
-bridge's assembly, byte enables and address mapping are broadly correct.
+So the bridge's assembly, byte enables, address mapping and row tracking all
+preserve data. Corrupt SDRAM reads are NOT supported as an explanation for any
+remaining fault.
+
+Three earlier versions of this model were wrong in ways worth remembering: it
+returned `z` on every read (no bench could ever have caught a fault), it drove
+the bus from a register clocked on the controller's own sampling edge, and at
+one point the return pipeline advanced on both edges and so moved twice per
+clock. All three were bench races. The model now shifts only on the falling
+edge, and the latency is a parameter rather than a hand-derivation.

@@ -2,31 +2,35 @@
 //
 // The controller programs burst length 1 (MODE in ki_sdram_burst.sv), so every
 // READ and WRITE is one word at an explicit column: no burst counter, no
-// auto-precharge. That is all this implements - ACTIVE latches a row, READ
+// auto-precharge. This implements exactly that - ACTIVE latches a row, READ
 // returns one word after a configurable delay, WRITE stores one word,
 // PRECHARGE closes rows.
 //
-// READ_LATENCY IS NOT DERIVED, IT IS CALIBRATED. The controller's own comment
-// says "the word for a READ issued from cas_pipe lands three clocks after
-// cas_pipe[0]", through a command register plus dq_cap and dq_stg. Rather than
-// re-derive that by hand and hope, the delay is a parameter swept by
-// tests/sim/tb_readback.sv: the value that makes 100% of a written pattern read
-// back unchanged is the alignment. Anything else means the model, not the
-// design, is off - and if NO value aligns, the design has a real fault.
+// READ_LATENCY IS CALIBRATED, NOT DERIVED. The controller's own comment says
+// "the word for a READ issued from cas_pipe lands three clocks after
+// cas_pipe[0]", through a command register plus dq_cap and dq_stg. Deriving
+// that by hand produced three wrong versions of this model, so the delay is a
+// parameter swept from the command line: the value at which a written pattern
+// reads back unchanged is the alignment.
 //
-// A previous version of this file returned z on every read, so no bench could
-// ever have caught a read-path fault. The read pipeline below is designed so
-// data is COMBINATIONAL at the pin for exactly the cycle it is due, rather than
-// registered and held, which is what makes the sweep meaningful.
+// TWO MISTAKES THIS FILE ALREADY MADE, recorded so they are not repeated:
+//   1. It returned z on every read, so no bench could ever have caught a
+//      read-path fault.
+//   2. The return pipeline was clocked on the rising edge, i.e. the model
+//      updated in the same instant the controller sampled, and the shift was
+//      later duplicated onto both edges so it advanced twice per clock. Both
+//      are bench races, not design faults. The pipeline below is a single
+//      shift on the FALLING edge: a word loaded for delay N is driven N-1
+//      clocks later and is stable across every rising edge in between.
 `timescale 1ns/1ps
 `default_nettype none
 module sdram_model #(
-	parameter integer ROW_BITS    = 13,
-	parameter integer COL_BITS    = 10,
-	parameter integer MEM_WORDS   = 1 << 20,
-	// Cycles from the READ command being seen by the device to the word being
-	// driven on DQ. 0..6 is the whole plausible range; the bench sweeps it.
-	parameter integer READ_LATENCY = 2
+	parameter integer ROW_BITS     = 13,
+	parameter integer COL_BITS     = 10,
+	parameter integer MEM_WORDS    = 1 << 20,
+	// Clocks from a READ being seen by the device to the word reaching the pin.
+	parameter integer READ_LATENCY = 2,
+	parameter integer SH_DEPTH     = 20
 ) (
 	input  wire        clk,
 	input  wire [12:0] a,
@@ -39,39 +43,22 @@ module sdram_model #(
 	input  wire        we_n,
 	input  wire        cs_n
 );
-	localparam integer DEPTH = 8;
-
 	reg [15:0] mem [0:MEM_WORDS-1];
 
 	wire [2:0] cmd = {ras_n, cas_n, we_n};
-	// Write data is sampled from the pin while the WRITE command is seen.
-	wire [15:0] dq_in = dq;
 	localparam [2:0] CMD_ACTIVE = 3'b011,
 	                 CMD_READ   = 3'b101,
 	                 CMD_WRITE  = 3'b100,
 	                 CMD_PRECHG = 3'b010;
 
+	wire [15:0] dq_in = dq;      // write data, sampled while WRITE is seen
+
 	reg [ROW_BITS-1:0] open_row [0:3];
 	integer addr;
 	always @(*) addr = ((open_row[ba] * (1 << COL_BITS)) + a[COL_BITS-1:0]) % MEM_WORDS;
 
-	// Return pipeline. Data is loaded at index READ_LATENCY and shifted one
-	// stage per clock toward index 0, which is the stage wired to the pin.
-	// sh_v[0] is written BY the shift (never separately cleared), so a loaded
-	// word is guaranteed to arrive; an earlier version cleared it every cycle
-	// and nothing ever came out.
-	localparam integer SH_DEPTH = 16;
-	reg [15:0] sh_d [0:SH_DEPTH-1];
-	reg [SH_DEPTH-1:0] sh_v = {SH_DEPTH{1'b0}};
-	integer k;
-
+	// ---- command side: rising edge, exactly when the device sees the command
 	always @(posedge clk) begin
-		// Shift toward index 0: sh_v[0] must receive sh_v[1], not a literal 0.
-		sh_v <= {1'b0, sh_v[SH_DEPTH-1:1]};
-		// Data must move the SAME direction as the valid bit: toward index 0.
-		for (k = 0; k < SH_DEPTH-1; k = k + 1)
-			sh_d[k] <= sh_d[k+1];
-
 		if (cke && !cs_n) begin
 			case (cmd)
 				CMD_ACTIVE: open_row[ba] <= a[ROW_BITS-1:0];
@@ -79,11 +66,6 @@ module sdram_model #(
 				CMD_WRITE: begin
 					if (!dqm[0]) mem[addr][7:0]  <= dq_in[7:0];
 					if (!dqm[1]) mem[addr][15:8] <= dq_in[15:8];
-				end
-
-				CMD_READ: begin
-					sh_d[READ_LATENCY] <= mem[addr];
-					sh_v[READ_LATENCY] <= 1'b1;
 				end
 
 				CMD_PRECHG: begin
@@ -99,9 +81,28 @@ module sdram_model #(
 		end
 	end
 
-	// Drive on sh_v[0] and hold one extra clock: the controller samples on a
-	// separate phase of the same clock, so a single-clock window can be missed
-	// by the bench's own alignment rather than by the design.
+	// ---- return pipeline: falling edge, so data never changes on a sampling edge
+	// One slot per clock of latency. Several reads may be in flight at once -
+	// the controller pipelines consecutive burst-length-1 READs - and each
+	// occupies its own slot, so they do not overwrite one another. A single
+	// "one read outstanding" register could not represent that, and dropped a
+	// word wherever the request pattern changed.
+	reg [15:0] sh_d [0:SH_DEPTH-1];
+	reg [SH_DEPTH-1:0] sh_v = {SH_DEPTH{1'b0}};
+	integer k;
+
+	always @(negedge clk) begin
+		// Shift toward index 0 first, then load the newest read at its delay.
+		sh_v <= {1'b0, sh_v[SH_DEPTH-1:1]};
+		for (k = 0; k < SH_DEPTH-1; k = k + 1)
+			sh_d[k] <= sh_d[k+1];
+
+		if (cke && !cs_n && cmd == CMD_READ) begin
+			sh_d[READ_LATENCY-1] <= mem[addr];
+			sh_v[READ_LATENCY-1] <= 1'b1;
+		end
+	end
+
 	assign dq = sh_v[0] ? sh_d[0] : 16'hzzzz;
 
 	integer i;
