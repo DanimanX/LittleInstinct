@@ -422,9 +422,9 @@ module ki_ata (
       last_write_lba    <= 32'h0;
       irq_pending_d     <= 1'b0;
       irq_pending       <= 1'b0;
-      image_ready       <= 1'b0;
-      image_readonly    <= 1'b1;
-      image_sectors     <= 32'h0000_0000;
+      image_ready       <= |img_size[63:9];
+      image_readonly    <= img_readonly;
+      image_sectors     <= img_size[40:9];
       identify_transfer <= 1'b0;
       sd_lba            <= 32'h0000_0000;
       sd_blk_cnt        <= 6'd0;

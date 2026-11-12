@@ -284,6 +284,7 @@ module pk_io #(
 	reg        loader_short       = 1'b0;
 	reg        loader_aborted     = 1'b0;
 	reg [15:0] end_grace          = 16'd0;
+	reg        img_mounted_sent   = 1'b0;
 
 	always @(posedge clk) begin
 		fifo_rd      <= 1'b0;
@@ -314,7 +315,8 @@ module pk_io #(
 			disk_active    <= 1'b0;
 			disk_is_write  <= 1'b0;
 			img_size       <= game_select[0] ? DEFAULT_KI2_SIZE : DEFAULT_KI1_SIZE;
-			img_mounted    <= 1'b0;
+			img_mounted        <= 1'b0;
+			img_mounted_sent   <= 1'b0;
 			loader_end_latched <= 1'b0;
 			loader_short       <= 1'b0;
 			loader_aborted     <= 1'b0;
@@ -456,6 +458,10 @@ module pk_io #(
 				// Release the download so the core leaves reset
 				// (KillerInstinct.sv: core_reset = shell_reset | ioctl_download).
 				ioctl_download <= 1'b0;
+				if (!img_mounted_sent) begin
+					img_mounted      <= 1'b1;
+					img_mounted_sent <= 1'b1;
+				end
 				if (!fifo_empty) begin
 					fifo_rd <= 1'b1;
 					st      <= S_DISK_RD;

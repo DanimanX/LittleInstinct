@@ -878,9 +878,7 @@ reg  fb_write_seen = 1'b0;
 always @(posedge clk_core) begin
 	if (core_reset)
 		fb_write_seen <= 1'b0;
-	else if (fb_write_accept_pulse && !cpu_reset &&
-	         ((debug_cpu_pc_sync[31:16] != 16'hbfc0) ||
-	          (debug_cpu_pc_sync[15:0] >= 16'h06a8)))
+	else if (fb_write_accept_pulse && !cpu_reset)
 		fb_write_seen <= 1'b1;
 end
 wire [7:0] framebuffer_red;
@@ -1867,10 +1865,6 @@ always @(*) begin
 			red   = debug_red;
 			green = debug_green;
 			blue  = debug_blue;
-		end else if(!fb_write_seen) begin
-			red   = 8'h00;
-			green = 8'h00;
-			blue  = 8'h00;
 		end else begin
 			red   = framebuffer_red;
 			green = framebuffer_green;
