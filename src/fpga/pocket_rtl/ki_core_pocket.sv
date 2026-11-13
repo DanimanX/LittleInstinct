@@ -1733,10 +1733,35 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
 // and the reboot capture never fired because no reset term asserts after boot
 // (V:0 across two hardware runs). The departure capture answers the question
 // that is still open, so it takes those two rows.
+reg controller_sdram_ready_ctl_seen = 1'b0;
+always @(posedge clk_sdram_ctl) begin
+	if (!pll_locked)
+		controller_sdram_ready_ctl_seen <= 1'b0;
+	else if (controller_sdram_ready)
+		controller_sdram_ready_ctl_seen <= 1'b1;
+end
+
+reg controller_sdram_ready_core_seen = 1'b0;
+always @(posedge clk_core) begin
+	if (!pll_locked)
+		controller_sdram_ready_core_seen <= 1'b0;
+	else if (controller_sdram_ready)
+		controller_sdram_ready_core_seen <= 1'b1;
+end
+
 wire [31:0] debug_loader_summary = {9'd0, debug_loader_info[27:6], 1'b0};
 wire [31:0] debug_boot_summary = {
-	16'd0,
-	boot_state,             // bits 15:13
+	debug_loader_info[31:28],         // bits 31:28 pk_io FSM state
+	debug_download_info[31:28],       // bits 27:24 bridge state[4:1]
+	boot_ready,                       // bit 23
+	buttons[1],                       // bit 22
+	RESET,                            // bit 21
+	shell_reset,                      // bit 20
+	core_reset,                       // bit 19
+	controller_sdram_ready_ctl_seen,  // bit 18
+	controller_sdram_ready_core_seen, // bit 17
+	controller_sdram_ready,           // bit 16
+	boot_state,                       // bits 15:13
 	boot_timed_out,         // bit 12
 	loader_abort,           // bit 11
 	debug_loader_info[0],   // bit 10 aborted
