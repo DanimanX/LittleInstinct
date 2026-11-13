@@ -36,18 +36,19 @@ create_generated_clock -name KI_SDRAM_CLK \
 
 # ---- Asynchronous Clock Groups -----------------------------------------------
 # Group 1: APF bridge & input PLL clocks (clk_74a, clk_74b, bridge_spiclk, u_pll).
-# Group 2: Core PLL main clocks (clk_core 50MHz, sdram_ctl 100MHz, sdram_cap 100MHz).
-#          Crossings between general[0] and general[4]/[5] are bounded by multicycle paths.
+# Group 2: Core PLL main clocks (clk_core 50MHz, sdram_ctl 100MHz, sdram_cap 100MHz,
+#          sdram_pin 100MHz, KI_SDRAM_CLK). Crossings between general[0]/[4]/[5] and
+#          KI_SDRAM_CLK are bounded by the multicycle and I/O delay constraints below.
 # Group 3: Core CPU clock (clk_cpu 50MHz). Carries a 250ps phase offset from clk_core.
 #          Crosses through explicit synchronisers.
-# Group 4: SDRAM pin clock (clk_sdram_pin 100MHz, dram_clk).
 set_clock_groups -asynchronous \
   -group [get_clocks {clk_74a clk_74b bridge_spiclk ic|iki|u_pll|*divclk}] \
   -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk \
+                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk \
                       ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk \
-                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[5].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk KI_SDRAM_CLK}]
+                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[5].gpll~PLL_OUTPUT_COUNTER|divclk \
+                      KI_SDRAM_CLK}] \
+  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}]
 
 # ---- Asynchronous Reset Paths -----------------------------------------------
 set_false_path -from [get_keepers {*rst_sync[*]}]
