@@ -677,6 +677,7 @@ wire [31:0] debug_cpu_pc;
 wire [31:0] debug_cpu_retired;
 wire [31:0] debug_cpu_irq_count;
 wire [31:0] debug_cpu_t2_reload_count;
+wire [31:0] debug_cop0_cause_live;
 // ---------------------------------------------------------------------------
 // The frozen pre-event execution trace, brought across from the CPU domain.
 //
@@ -851,6 +852,8 @@ localparam DEBUG_BUILD = 1;
 localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
+reg [31:0] debug_cop0_cause_live_meta = 32'h0000_0000;
+reg [31:0] debug_cop0_cause_live_sync = 32'h0000_0000;
 wire [18:0] framebuffer_base;
 wire framebuffer_memory_request;
 wire [27:0] framebuffer_memory_address;
@@ -1163,6 +1166,8 @@ always @(posedge clk_core) begin
 	debug_cpu_ret_count_sync <= debug_cpu_ret_count_meta;
 	debug_ata_info_meta <= debug_ata_info;
 	debug_ata_info_sync <= debug_ata_info_meta;
+	debug_cop0_cause_live_meta <= debug_cop0_cause_live;
+	debug_cop0_cause_live_sync <= debug_cop0_cause_live_meta;
 	debug_ds_count_meta <= debug_cpu_ds_count;
 	debug_ds_count_sync <= debug_ds_count_meta;
 	debug_ds_first_meta <= debug_cpu_ds_first;
@@ -1329,6 +1334,7 @@ ki_cpu_core #(
 	.debug_dep_valid(debug_cpu_dep_valid),
 	.debug_dep_trigger(debug_cpu_dep_trigger),
 	.debug_exc_cause(debug_cpu_exc_cause),
+	.debug_cop0_cause_live(debug_cop0_cause_live),
 	.debug_ret_count(debug_cpu_ret_count),
 	.debug_trace_bus(debug_cpu_trace_bus),
 	.debug_trace_frozen(debug_cpu_trace_frozen),
@@ -1821,7 +1827,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// Row 8 shows EX: the COP0 Cause latched with DP/DO.
 		// Latched synchronously on debug_dep_strobe into debug_dep_cause_hold (8 bits)
 		// in clk_core. Bits 6:2 contain ExcCode.
-		.reset_info({24'd0, debug_dep_cause_hold}),
+		.reset_info(debug_dep_valid_sync ? {24'd0, debug_dep_cause_hold} : debug_cop0_cause_live_sync),
 		.reset_first(debug_reset_first),
 		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
