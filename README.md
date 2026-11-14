@@ -640,7 +640,130 @@ es `EX:` (fila 8) junto con `DP:`/`DO:` (fila 14 y fila 10).
 
 ---
 
-## Estado al 2026-11-12 (punto de continuación)
+### 13. v1.0.26 — la captura de v1.0.25 dice que es un cuelgue, no un reinicio
+
+**Medido en hardware con v1.0.25 (V175)** — `IMG_20261114_091559.jpg`, foto del
+status page con el overlay visible.
+
+```
+KI DEBUG V175
+RST:0 BOOT:1 SD:1 L3      PLL:1 HDD:1 VB:006B?
+ERR:00 I:00000000 V:1     PC:8802DB08  TR:00003
+RX:00480000 DK:001000     N:1A76BBE9  EC:00 SD:P
+SB:91DA0800 RDY:1         EX:C0000C00
+RF:00000002               DO:00013803
+BF:00876173 AU:01400      RC:01030000
+AT:0 SR:50 ER:00          DP:91C00000  V:0 C:00
+```
+
+Cada línea decodificada contra el RTL:
+
+- **`BF:00876173`** — el supervisor de arranque entero y limpio:
+  `boot_ready=1`, `boot_state=3` (ready), marcador de fin visto,
+  `sdram_ready=1`, `boot_loaded=1`, PLLs bloqueados, `sdram_clk_seen=1`, sin
+  `loader_abort`, sin overflow, sin timeout, y **ningún término de reset
+  activo** (`RESET`, `shell_reset`, `core_reset` los tres en 0).
+- **`RX:00480000`** — la ROM completa llegó. **`SD:P`** con **`EC:00`** — autotest
+  de SDRAM sin errores en ambas mitades.
+- **`AT:0 SR:50 ER:00`** — ATA en reposo, `status` = DRDY, sin error.
+- **`SB:91DA0800`** — los 16 bits bajos son `dcs_host_status = 0x0800` y el bit
+  11 es la línea de *ready* que el juego sondea: **`RDY:1`**, la placa DCS
+  responde.
+- **`N:1A76BBE9`** — 444.514.281 instrucciones retiradas con `ERR:00` y
+  `PC:8802DB08`: la CPU **corre**, en RAM principal, y no ha levantado ninguna
+  bandera de error.
+- **`RF:00000002`** — máscara del primer reset espontáneo `0x0000`, bloqueos de
+  PLL `0x00`, resets espontáneos `0`, descargas ROM/ioctl `2`. **Nada reinició el
+  core después del arranque.**
+- **`V:0 C:00 RC:01030000`** — no hubo salida capturada: ni salto al boot ROM ni
+  vuelta a `0x88000000` (transiciones RAM→boot ROM = `0000`), y el programa
+  entró a `0x88000000` **una sola vez** (`01`, que es el hand-off normal del
+  arranque).
+
+#### El hallazgo: las interrupciones se acumulan y nunca se atienden
+
+- **`I:00000000`** — el contador de IRQ aceptadas por la CPU está en **cero**
+  pese a 444 millones de instrucciones. Y ya estaba en cero en la foto de
+  v1.0.14: no es un artefacto de este build.
+- **`EX:C0000C00`** — con `V:0` es la forma viva `{irq_sync, IP[7:0]}`: los
+  **dos** bits de `irq_sync` en 1 (`vblank` y `ATA`) y `Cause.IP[7:0] = 0x0C`,
+  o sea `IP[3]` (ATA) e `IP[2]` (vblank) **ambos pendientes**.
+- **`DP:91C00000`** con `V:0` **no es una dirección**. Es la palabra de depuración
+  del ATA, `{last_command, irq, irq_pending, nIEN, 0, data_index, data_writes}`:
+  - `last_command = 0x91` → **INITIALIZE DEVICE PARAMETERS**
+  - `irq = 1`, `irq_pending = 1`, `nIEN = 0` (interrupciones del disco
+    **habilitadas** por software)
+
+  El ATA está **sosteniendo su línea de IRQ** en alto. `irq_pending` sólo se
+  limpia cuando la CPU lee el registro de status (`ki_ata.sv`, CS0 offset 7);
+  sigue en 1, así que **la CPU no ha tocado el disco desde que ese comando
+  terminó**. Ese es el cuadro clásico de un juego esperando una interrupción que
+  nunca llega.
+- **`RC` dígitos 2-3 = `03`** — tres `INITIALIZE DEVICE PARAMETERS` cuando el
+  diseño asume **dos por arranque** (`ata_restart_seen`). Con una sola entrada a
+  `0x88000000`, la lectura más simple es que la rutina de init reintentó una vez
+  y se quedó esperando en la tercera.
+- **`DO:00013803`** con `V:0` es el estado del adaptador SDRAM, no un opcode:
+  `state=00` (IDLE), `startup_done=1`, `packed_ready=1`,
+  `controller_ready=1`. El adaptador está sano y ocioso — no es el cuello de
+  botella.
+
+#### Qué cambió respecto de v1.0.14
+
+La foto anterior (`IMG_20261112_105211.jpg`) mostraba lo contrario:
+`V:1 C:01 DP:8802EC4C`, `RC:02030001`. Ese build **sí** capturaba una salida por
+software y un reinicio. Con v1.0.25 el juego ya no se reinicia: **se cuelga**.
+Entre esos dos puntos están v1.0.17 (SDC), v1.0.19 (unblanking y `image_ready`),
+v1.0.20 (constraints de `KI_SDRAM_CLK`) y v1.0.25 (reset de SDRAM posterior al
+lock del PLL). No hay todavía una corrida que aísle cuál de los cuatro movió el
+síntoma.
+
+#### Lo que la pantalla de v1.0.25 no podía contestar
+
+`EX` sólo mostraba `{irq_sync, IP}`: lo que está **pendiente**. No mostraba ni
+`SR.IE` ni `SR.IM`, que son la otra mitad de `irqTrigger`
+(`cpu_cop0.vhd`: `IE=1 && EXL=0 && ERL=0 && (IM & IP) != 0`). Por eso
+"no hay ninguna IRQ habilitada" y "el core no despacha IRQ" producían **la misma
+pantalla**, y son hallazgos opuestos.
+
+**v1.0.26** mete esa mitad en el mismo campo. Con `V:0`, `EX` ahora es
+`IEMM00PP`:
+
+- dígito 0 = `{irq_ata, irq_vblank, SR.IE, SR.EXL}`
+- dígito 1 = `SR.IM[3:0]`
+- dígitos 4-5 = `Cause.IP[7:0]`
+
+Tabla de lectura con `V:0`:
+
+- `IP` puesto e `IE=0` → la CPU todavía no puede atender; el juego no llegó a
+  habilitar interrupciones.
+- `IP` puesto, `IE=1`, bit de `IM` en 0 → esa fuente está enmascarada.
+- `IP` puesto, `IE=1`, bit de `IM` en 1 → **habilitada y pendiente y no se
+  atiende**: el defecto está en el camino de interrupción del core, no en el
+  juego.
+
+Además, con `V:0` las filas 10 y 14 ahora rotulan **`AS`** y **`AI`** en vez de
+`DO` y `DP`, porque en ese caso no son un opcode ni una dirección. `DP:91C00000`
+se podía leer como un PC; es un comando de disco. `V` decide la etiqueta.
+
+**Fit de v1.0.26** (Quartus 25.1 Lite, `5CEBA4F23C8`):
+
+- ALMs **18.255 / 18.480 (99 %)**, LABs **1846 / 1848**, memoria de bloque 48 %,
+  DSP 35 %.
+- Setup del peor caso `clk_core`: **−2,04 ns** (v1.0.25 daba **−2,66 ns** en el
+  árbol de `output_files` que quedó del build anterior). Sigue siendo el mismo
+  cono heredado del `adsp2105` (`mstat[0] → banco G0 → ALU → astat[6]`), no un
+  camino nuevo: los 16 registros del probe caen fuera de él.
+- Hold **+0,30 ns**, recovery **+9,17 ns**: cerrados.
+- `pocket_ki.rbf` 1.942.528 bytes, MD5 `7e7d80ecf3420bf7141b2246ed718131`;
+  `bitstream.rbf_r` MD5 `c1864a52cbec3de865fa2c409bbe642c`.
+
+**Sin verificar en consola.** La próxima corrida debe leer `EX` con `V:0` y decir
+si `IE` está en 1.
+
+---
+
+## Estado al 2026-11-14 (punto de continuación)
 
 Esta sección existe para retomar el trabajo sin reconstruir el contexto. Todo lo
 que sigue está medido en hardware real, no inferido, salvo lo que se marca
@@ -663,34 +786,42 @@ RST:0  BOOT:1  PLL:1  HDD:1  SD:1  RX:00480000  RDY:1
 
 ### Lo que queda: el juego no llega a la demo
 
-Síntoma: tras el bip la pantalla queda azul y el juego vuelve a su secuencia de
-inicio; a veces se observa `AT:3`.
+Síntoma con v1.0.25: tras el bip la pantalla queda azul, la CPU sigue ejecutando
+en RAM principal (`PC:8802DB08`, 444 M de instrucciones), no se reinicia
+(`RF:00000002`, `V:0`, `RC` sin transiciones RAM→boot ROM) y **no atiende ni una
+interrupción** (`I:00000000`) mientras el ATA sostiene su IRQ en alto con un
+comando completado y sin reconocer. Ver la sección 13 para el detalle.
 
 **Lo que ya está descartado por medición:** el reinicio **no** es un reset de
-hardware (`V:0` en dos corridas), y el cargador, el watchdog del disco y las
-lecturas SDRAM están limpios (ver "Descartado con evidencia").
+hardware (`V:0` en tres corridas), y el cargador, el watchdog del disco, las
+lecturas SDRAM, la placa DCS y el adaptador SDRAM están limpios (ver "Descartado
+con evidencia" y la sección 13).
 
-**Lo que cambia en v1.0.15:** hay instrumentación para el camino
-que queda vivo, el reinicio **por software**. Hasta ahora `DP:` y `DO:` estaban
-cableados a cero en el port Pocket; ahora son una captura real.
+**Lo que cambia en v1.0.26:** `EX` con `V:0` muestra `SR.IE`, `SR.EXL` y
+`SR.IM[3:0]` junto a `Cause.IP`, que es lo único que separa "el juego no habilitó
+las interrupciones" de "el core no las despacha".
 
 ### Próximo paso concreto (empezar aquí)
 
-1. Instalar el build v1.0.15 en la microSD y llegar hasta el cuelgue tras el bip.
+1. Instalar v1.0.26 en la microSD y llegar hasta el cuelgue tras el bip.
 2. Leer la pantalla de estado y anotar, en este orden:
-   - **`V:`** (fila 14, col. 14) — ¿hubo captura?
-   - **`C:`** (fila 14, col. 18-19) — `01` boot ROM, `10` vuelta a `0x88000000`.
-   - **`DP:`** (fila 14) y **`DO:`** (fila 10) — desde dónde saltó y con qué
-     instrucción.
-   - **`RC:`** (fila 12) — el contador independiente de reentradas.
+   - **`EX:`** (fila 8) con **`V:0`** — `IEMM00PP`; el bit de `IE` y los bits de
+     `IM` que correspondan a `IP[3]` (ATA) e `IP[2]` (vblank).
+   - **`V:`** (fila 14, col. 14) — si sigue en 0, el juego sigue colgado y no
+     reiniciándose.
+   - **`AI:`** (fila 14) — `last_command` en los dígitos 0-1, `irq`/`irq_pending`
+     en el dígito 2. Si `irq_pending` sigue en 1 la CPU no tocó el disco.
+   - **`RC:`** (fila 12) — dígitos 2-3 siguen siendo el contador de `0x91`.
    - **`PC:`** (fila 4) y **`RDY:`** (fila 7) — dónde está ahora y si espera al
      DSP.
 3. Según el resultado:
-   - `V:1` → el juego se reinicia por software y ya se sabe desde qué dirección y
-     con qué instrucción. Toca leer el código del juego en esa dirección (dump de
-     `kinst.rom`) para saber por qué rama de error entró.
-   - `V:0` con `PC` clavado → no se reinicia, se **cuelga**. Comparar `PC` con el
-     rango del bucle y mirar `RDY` y `AT`/`SR`/`ER` del disco.
+   - `IE=0` → la rutina de arranque del juego no habilitó interrupciones. Tocar
+     el camino que la deja esperando (disco, DCS, o el valor que sondea).
+   - `IE=1` y el bit de `IM` en 1 → el core tiene una IRQ habilitada y pendiente
+     y no la despacha: el defecto está en `cpu_cop0.vhd` o en el cruce de
+     `irq_sync`, no en el juego.
+   - `IE=1` y el bit de `IM` en 0 → el juego enmascaró esa fuente; hay que ver
+     cuál espera.
    - `RDY:0` → prioridad al ADSP (ver deuda técnica abajo), no al reinicio.
 
 ### Bugs propios encontrados y corregidos en sesiones anteriores
@@ -772,7 +903,7 @@ Los bancos de `tests/sim/` **no** se pudieron ejecutar en esta pasada porque
 `iverilog` no está instalado en esta máquina; el análisis y la síntesis de
 Quartus sí corrieron, y son los que validan la sintaxis y la elaboración.
 
-Estado del árbol: build **v1.0.16**, página de estado **V165**, bitstream
-`d6f7e7d5e4944526d20bf5188e16d6c0` (`Release/.../bitstream.rbf_r`
-`3a5c2a462b8432d685607a6a7e152f67`). **Listo para prueba en consola.**
+Estado del árbol: build **v1.0.26**, página de estado **V176**, bitstream
+`7e7d80ecf3420bf7141b2246ed718131` (`Release/.../bitstream.rbf_r`
+`c1864a52cbec3de865fa2c409bbe642c`). **Listo para prueba en consola.**
 

@@ -852,8 +852,28 @@ localparam DEBUG_BUILD = 1;
 localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
-reg [9:0] debug_cop0_cause_10_meta = 10'd0;
-reg [9:0] debug_cop0_cause_10_sync = 10'd0;
+// Interrupt decision set, crossed into clk_core.
+//
+// Until v1.0.25 this carried only {irq_sync, IP[7:0]} - the two things that
+// say an interrupt is PENDING. It said nothing about whether the CPU was
+// allowed to take one, so a run that showed IP[3:2] set and an accept count of
+// zero could not be read: "no interrupt is enabled" and "the core will not
+// accept one" produce the same screen. Those are opposite findings, and three
+// builds (v1.0.21-v1.0.25) were spent looking at IRQs without the bits that
+// separate them.
+//
+// irqTrigger in cpu_cop0.vhd is
+//   SR.IE=1 && SR.EXL=0 && SR.ERL=0 && (SR.IM & Cause.IP) != 0
+// so the missing half is IE, EXL and IM. Those are the bits added here,
+// packed into 16 bits that map straight onto three screen digits.
+//
+//   probe[15:14] irq_sync (bit 1 ATA, bit 0 vblank, as driven into the CPU)
+//   probe[13]    SR.IE
+//   probe[12]    SR.EXL
+//   probe[11:8]  SR.IM[3:0]  (bit 3 masks the ATA IRQ, bit 2 the vblank IRQ)
+//   probe[7:0]   Cause.IP[7:0] (bit 3 ATA, bit 2 vblank)
+reg [15:0] debug_cop0_probe_meta = 16'd0;
+reg [15:0] debug_cop0_probe_sync = 16'd0;
 wire [18:0] framebuffer_base;
 wire framebuffer_memory_request;
 wire [27:0] framebuffer_memory_address;
@@ -1159,8 +1179,13 @@ always @(posedge clk_core) begin
 	debug_cpu_ret_count_sync <= debug_cpu_ret_count_meta;
 	debug_ata_info_meta <= debug_ata_info;
 	debug_ata_info_sync <= debug_ata_info_meta;
-	debug_cop0_cause_10_meta <= {debug_cop0_cause_live[31:30], debug_cop0_cause_live[15:8]};
-	debug_cop0_cause_10_sync <= debug_cop0_cause_10_meta;
+	debug_cop0_probe_meta <=
+		{debug_cop0_cause_live[31:30],  // irq_sync, substituted in ki_cpu_core
+		 debug_cop0_cause_live[0],     // SR.IE
+		 debug_cop0_cause_live[16],    // SR.EXL
+		 debug_cop0_cause_live[27:24], // SR.IM[3:0]
+		 debug_cop0_cause_live[15:8]}; // Cause.IP[7:0]
+	debug_cop0_probe_sync <= debug_cop0_probe_meta;
 	debug_ds_count_meta <= debug_cpu_ds_count;
 	debug_ds_count_sync <= debug_ds_count_meta;
 	debug_ds_first_meta <= debug_cpu_ds_first;
@@ -1843,10 +1868,24 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// departure has been captured, and V:0 before that.
 		.pcm_level({23'd0, debug_dep_valid_sync, 6'd0, debug_dep_trig_hold}),
 		.cpu_response_status(32'd0),
-		// Row 8 shows EX: the COP0 Cause latched with DP/DO.
-		// Latched synchronously on debug_dep_strobe into debug_dep_cause_hold (8 bits)
-		// in clk_core. Bits 6:2 contain ExcCode.
-		.reset_info(debug_dep_valid_sync ? {24'd0, debug_dep_cause_hold} : {debug_cop0_cause_10_sync[9:8], 14'd0, debug_cop0_cause_10_sync[7:0], 8'd0}),
+		// Row 8 shows EX. With a departure captured (V:1) it is the 8-bit COP0
+		// Cause of that departure; with no departure (V:0) it is the live
+		// interrupt decision set, laid out in the same digit positions so the
+		// two readings can be told apart by V alone:
+		//
+		//   V:1  EX:00000Cxx - the departure Cause; ExcCode in bits 6:2
+		//                    (4 AdEL, 5 AdES, 8 Sys, A RI, 0 Int)
+		//   V:0  EX:IEMM00PP - digit 0 = {irq_ata, irq_vblank, SR.IE, SR.EXL},
+		//                    digit 1 = SR.IM[3:0], digits 4-5 = Cause.IP[7:0]
+		//
+		// "V:0 EX:EF000C00" reads: both IRQ lines asserted, interrupts ENABLED,
+		// not in an exception, IRQs 3 and 2 unmasked and both pending - a real
+		// fault, the CPU should have taken it. "V:0 EX:C0000C00" reads: same
+		// pending bits with IE=0 and IM=0, i.e. the game has not enabled
+		// interrupts yet and is polling, not waiting on an IRQ.
+		.reset_info(debug_dep_valid_sync ? {24'd0, debug_dep_cause_hold} :
+		            {debug_cop0_probe_sync[15:8], 8'd0,
+		             debug_cop0_probe_sync[7:0], 8'd0}),
 		.reset_first(debug_reset_first),
 		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
