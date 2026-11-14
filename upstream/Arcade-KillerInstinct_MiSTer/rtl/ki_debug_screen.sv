@@ -505,7 +505,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="7";
+          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="8";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -793,6 +793,21 @@ module ki_debug_screen #(
           11: screen_char="E"; 12: screen_char="R"; 13: screen_char=":";
           14: screen_char=hex_ascii(d_ata_error[7:4]);
           15: screen_char=hex_ascii(d_ata_error[3:0]);
+          // Columns 16-19 were free, and with a departure captured (V:1) rows 10
+          // and 14 stop showing the ATA at all - they hold DP/DO instead. The
+          // live word arrives on cpu_response_status, which used to be a tied-off
+          // constant:
+          //
+          //   column 17      irq_pending, the line the game polls as Cause.IP[3]
+          //   columns 18-19  data_index, progress through the sector buffer
+          //
+          // Read together: irq_pending=1 with data_index frozen means the ATA
+          // asked and the CPU did not answer. irq_pending=0 with AT=3 means the
+          // ATA never asked, which is a different fault in a different block.
+          16: screen_char="P";
+          17: screen_char=8'h30+{7'd0, d_cpu_response_status[22]};
+          18: screen_char=hex_ascii(d_cpu_response_status[15:12]);
+          19: screen_char=hex_ascii(d_cpu_response_status[11:8]);
           default: screen_char=" ";
         endcase
         // AC packs, left to right:
@@ -907,7 +922,7 @@ module ki_debug_screen #(
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
           9: trace_char="V"; 10: trace_char="1"; 11: trace_char="7";
-          12: trace_char="7";
+          12: trace_char="8";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin

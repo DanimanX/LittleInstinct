@@ -688,7 +688,14 @@ module ki_ata (
                   geom_heads <= {4'd0, device_head[3:0]} + 8'd1;
                   command_complete();
                 end
-                8'h10, 8'h70, 8'he7, 8'hef, 8'hc6: command_complete();
+                // Commands that carry no data phase and that a real drive simply
+                // accepts. 0xF9 (SET MAX ADDRESS) belongs here and did not: the
+                // game issues it at 8802D920 and falls through to
+                // command_abort(), so the drive answered ERR + ABRT (status 0x51,
+                // error 0x04) to a command a real unit accepts. The caller checks
+                // exactly that bit (`andi v0, 0x21` at 8802D930), so the game read
+                // it as a disk fault.
+                8'h10, 8'h70, 8'he7, 8'hef, 8'hc6, 8'hf9: command_complete();
                 default: command_abort();
               endcase
             end

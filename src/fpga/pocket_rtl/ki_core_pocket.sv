@@ -1867,7 +1867,12 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// bit 8 as V and bits 7:0 as C, so this shows V:1 and C:01 / C:10 once a
 		// departure has been captured, and V:0 before that.
 		.pcm_level({23'd0, debug_dep_valid_sync, 6'd0, debug_dep_trig_hold}),
-		.cpu_response_status(32'd0),
+		// The LIVE ATA word, always - never the departure-capture substitute that
+		// `ata_info` gets above. Row 13 renders three of these bits (irq_pending
+		// and data_index) in its free columns 16-19, so that a capture in progress
+		// can no longer hide the one thing needed to tell "the ATA never raised
+		// its IRQ" from "it did and the CPU never saw it".
+		.cpu_response_status(debug_ata_info_sync),
 		// Row 8 shows EX. With a departure captured (V:1) it is the 8-bit COP0
 		// Cause of that departure; with no departure (V:0) it is the live
 		// interrupt decision set, laid out in the same digit positions so the
