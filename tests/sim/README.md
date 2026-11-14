@@ -63,28 +63,46 @@ semantics are documented at the top of that file, and two of its properties are
 load-bearing: the read address is registered (one clock of lag) and a read of an
 address written in the same cycle sees the new data.
 
-**Status: incomplete, and deliberately kept out of `run.sh`.** What it proves
-today:
+**Status: incomplete, and deliberately kept out of `run.sh`.** It passes the
+read path and does not yet drive the write path, and the difference is
+documented here rather than left to be rediscovered.
+
+What passes today:
 
 - a load that misses fills the line and answers with the memory contents
 - the three other doublewords of a filled line hit and answer
-- the internal read/write-rule assertions inside cpu_datacache are live and do
-  not fire under correct stimulus
+- a store does not disturb the other doublewords of its line
+- the read/write-rule assertions inside cpu_datacache are live: breaking the
+  address sequence mid-fill makes them fire
 
-What it does not yet do is drive the STORE path correctly. Stores commit for
-only one doubleword per 32-byte line, and the value comes back shifted by four
-bytes, which is the signature of a byte-lane/rotation disagreement between how
-the bench presents `write_data`/`write_be` and what the cache expects for a
-64-bit store. Whether that is the bench or the cache is NOT yet established, and
-the distinction matters: if it is the cache, it is a candidate explanation for
-the AdEL at 8802EC48 that started this whole investigation. Do not read the
-current failures as a finding either way.
+What does not: a store followed by a load returns the memory contents, i.e. the
+store is not landing at all, and the byte-lane and sequential groups inherit
+that.
 
-The immediate next step is to copy the store sequencing from cpu_pocket.vhd
-(`datacache_addr`, `executeMemWriteMask`, `executeMemWriteData`, and the
-`st_direct_a`/`st_direct_w` conditions) rather than approximating it.
+Two mistakes worth not repeating, both made here:
 
-## tb_readback
+1. **The cache is not endian-neutral and the bench has to speak its language.**
+   cpu_pocket.vhd wraps every store in `cpu_to_bus64` and every load in
+   `bus_to_cpu64`; the cache word-swaps 64-bit write data on its own
+   (`big_endian_writes`, `RW_64 = '1'`); and a fill writes `ddr3_DOUT` straight
+   into the RAMs, skipping the cache's transform, so the model must present
+   `{bswap(V(31:0)), bswap(V(63:32))}`. Getting this wrong looks exactly like
+   "the cache mangles stores". The bench now applies both transforms, copied
+   from the RTL rather than re-derived.
+2. **A note that says PASS must be conditional on the group's own errors.** The
+   first version printed "PASS: every byte lane..." beside eight failures,
+   because the note ran after the loop regardless of what the loop found.
+
+The next step is NOT more hand-made stimulus. Driving this cache from outside
+means re-deriving its contract, and the last three attempts at that were wrong
+in ways only the cache's own assertions caught. The right test is a **CPU-level
+one**: a tiny MIPS program (`sw` to the stack, then `lw` back, then a branch on
+equality) run on `cpu_pocket`, which exercises the real address/write-enable/
+write-data sequence by construction. Faults there are unambiguous, and it also
+covers the instruction cache, the pipeline and the load interlock, none of which
+this bench touches.
+
+## tb_readbacktb_readback
 
 `tb_readback.sv` writes a pattern to main RAM through the bridge's CPU port and
 reads it back, so a fault in the read path, the row-open tracking or the byte

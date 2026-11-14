@@ -129,6 +129,41 @@ architecture sim of tb_dcache is
       return std_logic_vector(shift_right(unsigned(d), 8 * lane));
    end function;
 
+   -- The two endian transforms cpu_pocket.vhd applies around the cache, copied
+   -- from its own functions so the bench speaks to the cache in the same
+   -- language the CPU does. Leaving them out is what made the first version of
+   -- this bench look like the cache mangled stores: it presented the register
+   -- value directly, and the cache word-swaps 64-bit write data by design
+   -- (cpu_datacache.vhd, big_endian_writes, RW_64 = '1').
+   function byteswap32(v : std_logic_vector(31 downto 0)) return std_logic_vector is
+   begin
+      return v(7 downto 0) & v(15 downto 8) & v(23 downto 16) & v(31 downto 24);
+   end function;
+
+   function cpu_to_bus64(v : std_logic_vector(63 downto 0)) return std_logic_vector is
+   begin
+      return byteswap32(v(63 downto 32)) & byteswap32(v(31 downto 0));
+   end function;
+
+   function bus_to_cpu64(v : std_logic_vector(63 downto 0)) return std_logic_vector is
+   begin
+      return byteswap32(v(31 downto 0)) & byteswap32(v(63 downto 32));
+   end function;
+
+   -- What the RAM must END UP holding for a value V to read back as V.
+   --
+   -- The store path is  V -> cpu_to_bus64 -> cache word-swap -> RAM, and the
+   -- load path is  RAM -> bus_to_cpu64 -> V. Solving bus_to_cpu64(X) = V gives
+   -- X = {bswap(V(31:0)), bswap(V(63:32))}, which is what the fill has to
+   -- deliver, because a fill writes ddr3_DOUT straight into the RAMs and skips
+   -- the cache's own transform. Getting this wrong twice is how this bench
+   -- spent its first two runs reporting "the cache mangles stores" when the
+   -- cache was behaving exactly as cpu_pocket.vhd expects.
+   function bus_for_fill(v : std_logic_vector(63 downto 0)) return std_logic_vector is
+   begin
+      return byteswap32(v(31 downto 0)) & byteswap32(v(63 downto 32));
+   end function;
+
 begin
 
    clk1x <= not clk1x after CLK1X_NS / 2;
@@ -213,7 +248,12 @@ begin
                beat_addr <= ram_reqAddr(31 downto 5) & "00000";
             elsif beats_left > 0 then
                ram_grant <= '0';
-               ddr3_DOUT <= mem(dw(beat_addr));
+               -- The bridge delivers a beat in BUS order, not raw memory
+               -- order: for big-endian it byte-swaps each word on the way in,
+               -- and the cache word-swaps 64-bit data again. Presenting raw
+               -- values here made every filled line read back word-swapped,
+               -- which is a mistake in the model, not in the cache.
+               ddr3_DOUT <= bus_for_fill(mem(dw(beat_addr)));
                ddr3_DOUT_READY <= '1';
                beat_addr <= beat_addr + 8;
                beats_left <= beats_left - 1;
@@ -255,7 +295,7 @@ begin
          for guard in 0 to 200 loop
             wait until read_done = '1' for 50 ns;
             if read_done = '1' then
-               d := read_data;
+               d := bus_to_cpu64(read_data);
                ok := true;
                exit;
             end if;
@@ -274,15 +314,19 @@ begin
                          be   : in std_logic_vector(7 downto 0)) is
          variable ok : boolean := false;
       begin
+         -- cpu_pocket.vhd drives datacache_addr and datacache_writeena in the
+         -- SAME cycle (cpu_pocket.vhd:5563-5566), so that is what a store looks
+         -- like here too. The cache registers the tag read and compares it a
+         -- cycle later; presenting the address early, which the read path here
+         -- does, is not the shape a store has.
          wait until rising_edge(clk1x);
          RW_addr    <= addr;
          RW_64      <= '1';
          RW_fb      <= '0';
-         tag_addr   <= addr;     -- same line as RW_addr: the tag compare uses this, and an
-         wait until rising_edge(clk1x);
+         tag_addr   <= addr;
          write_ena  <= '1';
          write_be   <= be;
-         write_data <= dat;
+         write_data <= cpu_to_bus64(dat);
          for guard in 0 to 200 loop
             wait until write_done = '1' for 50 ns;
             if write_done = '1' then
@@ -301,6 +345,7 @@ begin
       variable errors : integer := 0;
       variable d      : std_logic_vector(63 downto 0);
       variable n      : integer;
+      variable e0     : integer;   -- errors at the start of a group
    begin
       -- Known contents.
       for i in 0 to 127 loop
@@ -327,6 +372,7 @@ begin
       end if;
 
       -- 2. The rest of the line must hit.
+      e0 := errors;
       for i in 1 to 3 loop
          do_read(BASE + 8 * i, d);
          if d /= mem(dw(BASE + 8 * i)) then
@@ -336,7 +382,9 @@ begin
             errors := errors + 1;
          end if;
       end loop;
-      report "PASS: the rest of a filled line hits and answers" severity note;
+      if errors = e0 then
+         report "PASS: the rest of a filled line hits and answers" severity note;
+      end if;
 
       -- 3. Store then load, same doubleword.
       do_write(BASE + 8, x"DEAD_BEEF_1234_5678", "11111111");
@@ -358,6 +406,7 @@ begin
       end if;
 
       -- 5. Each byte lane on its own.
+      e0 := errors;
       for b in 0 to 7 loop
          do_write(BASE + 16, x"0000_0000_0000_0000", "11111111");
          do_write(BASE + 16, std_logic_vector(to_unsigned(16#11# * (b + 1), 64)) and
@@ -374,9 +423,14 @@ begin
             errors := errors + 1;
          end if;
       end loop;
-      report "PASS: every byte lane writes and reads back on its own" severity note;
+      if errors = e0 then
+         report "PASS: every byte lane writes and reads back on its own" severity note;
+      else
+         report "FAIL: byte lanes (" & integer'image(errors - e0) & " bad)" severity error;
+      end if;
 
       -- 6. Pointer-building pattern: store, read back, advance.
+      e0 := errors;
       n := 0;
       for i in 0 to 9 loop
          do_write(BASE + 32 + 8 * i, std_logic_vector(to_unsigned(16#1000# + i * 7, 64)), "11111111");
@@ -390,7 +444,11 @@ begin
             n := n + 1;
          end if;
       end loop;
-      report "PASS: ten store/load pairs across two lines" severity note;
+      if errors = e0 then
+         report "PASS: ten store/load pairs across two lines" severity note;
+      else
+         report "FAIL: sequential store/load (" & integer'image(errors - e0) & " bad)" severity error;
+      end if;
 
       if errors = 0 then
          report "PASS_DCACHE" severity note;
