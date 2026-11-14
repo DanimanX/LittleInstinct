@@ -46,6 +46,44 @@ Verified: passes on LBA 1, 255919, an 8-sector batch, 10 sectors (batch plus
 short remainder) and 12 sectors (two full batches). Serving the wrong LBA makes
 all five fail, so the comparison has teeth.
 
+## tb_dcache (GHDL, not part of run.sh)
+
+`tb_dcache.vhd` drives `cpu_datacache` directly, with the generics synthesis
+actually builds (every `DCACHE_*` in cpu_pocket.vhd defaults to false and
+nothing overrides it). It needs **GHDL**, because the cache is VHDL and GHDL
+cannot co-simulate the Verilog benches:
+
+```sh
+GHDL=/path/to/ghdl tests/sim/run_dcache.sh
+```
+
+`dpram_model.vhd` stands in for `rtl/cpu/dpram.vhd`, which wraps `altsyncram`
+and will not elaborate without Altera's megafunction library. The model's
+semantics are documented at the top of that file, and two of its properties are
+load-bearing: the read address is registered (one clock of lag) and a read of an
+address written in the same cycle sees the new data.
+
+**Status: incomplete, and deliberately kept out of `run.sh`.** What it proves
+today:
+
+- a load that misses fills the line and answers with the memory contents
+- the three other doublewords of a filled line hit and answer
+- the internal read/write-rule assertions inside cpu_datacache are live and do
+  not fire under correct stimulus
+
+What it does not yet do is drive the STORE path correctly. Stores commit for
+only one doubleword per 32-byte line, and the value comes back shifted by four
+bytes, which is the signature of a byte-lane/rotation disagreement between how
+the bench presents `write_data`/`write_be` and what the cache expects for a
+64-bit store. Whether that is the bench or the cache is NOT yet established, and
+the distinction matters: if it is the cache, it is a candidate explanation for
+the AdEL at 8802EC48 that started this whole investigation. Do not read the
+current failures as a finding either way.
+
+The immediate next step is to copy the store sequencing from cpu_pocket.vhd
+(`datacache_addr`, `executeMemWriteMask`, `executeMemWriteData`, and the
+`st_direct_a`/`st_direct_w` conditions) rather than approximating it.
+
 ## tb_readback
 
 `tb_readback.sv` writes a pattern to main RAM through the bridge's CPU port and
