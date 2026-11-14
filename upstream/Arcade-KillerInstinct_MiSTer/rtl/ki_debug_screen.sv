@@ -801,19 +801,30 @@ module ki_debug_screen #(
           //   column 16      bits 23:20 = {irq, irq_pending, nIEN, unused}
           //   columns 17-18  data_index, 8 bits, progress through the sector
           //
-          // The nibble is the whole point of the field. Read it as hex:
-          //   C = 1100  irq up, irq_pending set, nIEN clear -> the CPU can see it
-          //   E = 1110  irq_pending set but nIEN set -> the ATA is MASKING it,
-          //             so Cause.IP[3] stays 0 and a poll loop never exits
-          //   8 = 1000  irq asserted but already consumed
-          //   0 = 0000  nothing pending, the normal idle value
+          // The nibble is the whole point of the field. It is NOT four
+          // independent bits: ki_ata.sv:174 drives `irq = irq_pending &&
+          // !nIEN`, so bit 23 can never be set while bit 21 is. That leaves
+          // exactly four reachable values, and reading them as hex:
           //
-          // With data_index beside it: "E" plus a frozen data_index is a masked
-          // interrupt, and that is indistinguishable from a dead one until nIEN
-          // is on screen. An earlier cut of this field rendered bit 22 alone and
-          // two wrong data_index bits ([15:12] and [11:8] instead of [19:16] and
-          // [15:12]); a value of "P100" meant irq_pending=1 with data_index not
-          // actually shown.
+          //   0  = 0000  nothing pending, nothing masked - idle, the normal value
+          //   2  = 0010  nIEN set with nothing pending - interrupts are MASKED
+          //              at the drive and there is no reason to raise one
+          //   6  = 0110  irq_pending set AND nIEN set - the drive has data
+          //              waiting and is holding its own line low. Cause.IP[3]
+          //              stays 0, so a poll loop never exits. This is the
+          //              masked case, and it is what makes a live drive look dead.
+          //   C  = 1100  irq up, irq_pending set, nIEN clear - the CPU can see
+          //              it. If the game is still stuck on 6 vs C, the fault is
+          //              downstream in the COP0 interrupt path, not here.
+          //
+          // E (1110) is unreachable and must never be documented as "masked":
+          // nIEN high forces irq low, which is 6. An earlier revision of this
+          // comment said E, and that was wrong by one bit.
+          //
+          // An even earlier cut rendered bit 22 alone plus two data_index bits
+          // taken from the wrong lanes ([15:12] and [11:8] instead of [19:16]
+          // and [15:12]); a reading of "P100" meant irq_pending=1 with
+          // data_index not actually shown at all.
           16: screen_char=hex_ascii(d_cpu_response_status[23:20]);
           17: screen_char=hex_ascii(d_cpu_response_status[19:16]);
           18: screen_char=hex_ascii(d_cpu_response_status[15:12]);
