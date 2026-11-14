@@ -505,7 +505,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="8";
+          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="9";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -798,16 +798,25 @@ module ki_debug_screen #(
           // live word arrives on cpu_response_status, which used to be a tied-off
           // constant:
           //
-          //   column 17      irq_pending, the line the game polls as Cause.IP[3]
-          //   columns 18-19  data_index, progress through the sector buffer
+          //   column 16      bits 23:20 = {irq, irq_pending, nIEN, unused}
+          //   columns 17-18  data_index, 8 bits, progress through the sector
           //
-          // Read together: irq_pending=1 with data_index frozen means the ATA
-          // asked and the CPU did not answer. irq_pending=0 with AT=3 means the
-          // ATA never asked, which is a different fault in a different block.
-          16: screen_char="P";
-          17: screen_char=8'h30+{7'd0, d_cpu_response_status[22]};
+          // The nibble is the whole point of the field. Read it as hex:
+          //   C = 1100  irq up, irq_pending set, nIEN clear -> the CPU can see it
+          //   E = 1110  irq_pending set but nIEN set -> the ATA is MASKING it,
+          //             so Cause.IP[3] stays 0 and a poll loop never exits
+          //   8 = 1000  irq asserted but already consumed
+          //   0 = 0000  nothing pending, the normal idle value
+          //
+          // With data_index beside it: "E" plus a frozen data_index is a masked
+          // interrupt, and that is indistinguishable from a dead one until nIEN
+          // is on screen. An earlier cut of this field rendered bit 22 alone and
+          // two wrong data_index bits ([15:12] and [11:8] instead of [19:16] and
+          // [15:12]); a value of "P100" meant irq_pending=1 with data_index not
+          // actually shown.
+          16: screen_char=hex_ascii(d_cpu_response_status[23:20]);
+          17: screen_char=hex_ascii(d_cpu_response_status[19:16]);
           18: screen_char=hex_ascii(d_cpu_response_status[15:12]);
-          19: screen_char=hex_ascii(d_cpu_response_status[11:8]);
           default: screen_char=" ";
         endcase
         // AC packs, left to right:
@@ -922,7 +931,7 @@ module ki_debug_screen #(
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
           9: trace_char="V"; 10: trace_char="1"; 11: trace_char="7";
-          12: trace_char="8";
+          12: trace_char="9";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin
