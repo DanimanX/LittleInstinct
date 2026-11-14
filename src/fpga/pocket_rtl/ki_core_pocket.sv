@@ -1502,6 +1502,31 @@ assign bist_sdram_read = 1'b0;
 assign bist_sdram_write = 1'b0;
 `endif
 
+wire [15:0] debug_adapter_status;
+reg debug_packed_ready_seen = 1'b0;
+always @(posedge clk_core) begin
+	if (!pll_locked)
+		debug_packed_ready_seen <= 1'b0;
+	else if (debug_adapter_status[12])
+		debug_packed_ready_seen <= 1'b1;
+end
+
+// Hold the SDRAM adapter (clk_core + clk_sdram_ctl) and burst controller
+// (clk_sdram_ctl) in synchronous reset/init for 8 clk_core cycles (= 16
+// clk_sdram_ctl cycles) after pll_locked asserts. Asynchronous clear ensures
+// reset starts even before either PLL clock toggles cleanly, and holding init
+// across post-lock clock edges prevents ki_sdram_x2/ki_sdram_burst from starting
+// with un-reset state if pll_locked rises asynchronously or before clk2x starts.
+(* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
+reg [7:0] sdram_postlock_pipe = 8'd0;
+always @(posedge clk_core or negedge pll_locked) begin
+	if (!pll_locked)
+		sdram_postlock_pipe <= 8'd0;
+	else
+		sdram_postlock_pipe <= {sdram_postlock_pipe[6:0], 1'b1};
+end
+wire sdram_init_reset = ~sdram_postlock_pipe[7];
+
 // ki_sdram_x2 lives inside the adapter and packs the controller's 16-bit beats
 // into the 32 bits clk_core expects. clk_sdram_ctl runs at twice clk_core, so
 // a 32-bit beat comes out every clk_core cycle.
@@ -1509,7 +1534,7 @@ ki_sdram_adapter sdram_adapter
 (
 	.clk(clk_core),
 	.clk2x(clk_sdram_ctl),
-	.reset(~pll_locked),
+	.reset(sdram_init_reset),
 	.request_address(bridge_sdram_address),
 	.request_write_data(bridge_sdram_write_data),
 	.request_byte_enable(bridge_sdram_byte_enable),
@@ -1549,7 +1574,8 @@ ki_sdram_adapter sdram_adapter
 	.controller_ready(controller_sdram_ready),
 	.controller_fast_tog(controller_fast_tog),
 	.controller_fast_addr(controller_fast_addr),
-	.controller_fast_valid(controller_fast_valid)
+	.controller_fast_valid(controller_fast_valid),
+	.debug_status(debug_adapter_status)
 );
 
 // The address decomposition uses col = addr[9:1], so 512 consecutive words
@@ -1564,7 +1590,7 @@ ki_sdram_burst #(
 	.STARTUP_CYCLES(15'd12000), .REFRESH_PERIOD(13'd730)
 ) sdram_controller
 (
-	.init(~pll_locked),
+	.init(sdram_init_reset),
 	.clk(clk_sdram_ctl), .clk_cap(clk_sdram_cap),
 	.SDRAM_DQ(SDRAM_DQ),
 	.SDRAM_A(SDRAM_A),
@@ -1806,7 +1832,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(debug_dep_op_hold),
+		.cpu_prev_op(debug_dep_valid_sync ? debug_dep_op_hold : {15'd0, debug_packed_ready_seen, debug_adapter_status}),
 		.cpu_ret_prev(debug_boot_summary),
 		.cpu_eret_flags({debug_ata_info_sync[31:21], ata_irq, cpu_irq[1], cpu_irq[0], sound_reset, dcs_host_reset, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),

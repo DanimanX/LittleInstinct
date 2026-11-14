@@ -131,7 +131,7 @@ module ki_sdram_burst #(
   // rise on the same edge: S_READ_DRAIN releases as it captures that word.
   // ki_sdram_adapter turns `ready` into a done a clock later, so its own
   // ports keep the final word strictly before done.
-  output logic        dout_valid,
+  output logic        dout_valid = 1'b0,
   input  wire [255:0] din,       // up to 16 words, low word first
   input  wire         we,
   input  wire         rd,
