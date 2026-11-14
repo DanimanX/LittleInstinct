@@ -852,8 +852,8 @@ localparam DEBUG_BUILD = 1;
 localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
-reg [31:0] debug_cop0_cause_live_meta = 32'h0000_0000;
-reg [31:0] debug_cop0_cause_live_sync = 32'h0000_0000;
+reg [9:0] debug_cop0_cause_10_meta = 10'd0;
+reg [9:0] debug_cop0_cause_10_sync = 10'd0;
 wire [18:0] framebuffer_base;
 wire framebuffer_memory_request;
 wire [27:0] framebuffer_memory_address;
@@ -944,13 +944,6 @@ wire dcs_rom_ready;
 wire [63:0] dcs_rom_data;
 wire signed [15:0] dcs_audio;
 wire dcs_host_reset = core_reset | ~sound_reset;
-reg [15:0] dcs_rom_rdy_count = 16'd0;
-always @(posedge clk_core) begin
-	if (dcs_host_reset)
-		dcs_rom_rdy_count <= 16'd0;
-	else if (dcs_rom_ready && dcs_rom_rdy_count != 16'hFFFF)
-		dcs_rom_rdy_count <= dcs_rom_rdy_count + 16'd1;
-end
 
 reg debug_vblank_cpu_meta = 1'b0;
 reg debug_vblank_cpu_sync = 1'b0;
@@ -1166,8 +1159,8 @@ always @(posedge clk_core) begin
 	debug_cpu_ret_count_sync <= debug_cpu_ret_count_meta;
 	debug_ata_info_meta <= debug_ata_info;
 	debug_ata_info_sync <= debug_ata_info_meta;
-	debug_cop0_cause_live_meta <= debug_cop0_cause_live;
-	debug_cop0_cause_live_sync <= debug_cop0_cause_live_meta;
+	debug_cop0_cause_10_meta <= {debug_cop0_cause_live[31:30], debug_cop0_cause_live[15:8]};
+	debug_cop0_cause_10_sync <= debug_cop0_cause_10_meta;
 	debug_ds_count_meta <= debug_cpu_ds_count;
 	debug_ds_count_sync <= debug_ds_count_meta;
 	debug_ds_first_meta <= debug_cpu_ds_first;
@@ -1813,7 +1806,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(debug_dep_valid_sync ? debug_dep_op_hold : {dcs_rom_rdy_count, dcs_rom_request, dcs_rom_ready, 1'b0, dcs_rom_address[12:0]}),
+		.cpu_prev_op(debug_dep_op_hold),
 		.cpu_ret_prev(debug_boot_summary),
 		.cpu_eret_flags({debug_ata_info_sync[31:21], ata_irq, cpu_irq[1], cpu_irq[0], sound_reset, dcs_host_reset, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),
@@ -1827,7 +1820,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// Row 8 shows EX: the COP0 Cause latched with DP/DO.
 		// Latched synchronously on debug_dep_strobe into debug_dep_cause_hold (8 bits)
 		// in clk_core. Bits 6:2 contain ExcCode.
-		.reset_info(debug_dep_valid_sync ? {24'd0, debug_dep_cause_hold} : debug_cop0_cause_live_sync),
+		.reset_info(debug_dep_valid_sync ? {24'd0, debug_dep_cause_hold} : {debug_cop0_cause_10_sync[9:8], 14'd0, debug_cop0_cause_10_sync[7:0], 8'd0}),
 		.reset_first(debug_reset_first),
 		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
