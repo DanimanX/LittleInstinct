@@ -14,6 +14,7 @@ They need [Icarus Verilog](https://steveicarus.github.io/iverilog/) (`iverilog`,
 | `tb_input_chord.sv` | Start + Select fires once inside the window, never on a lone press, never repeats while held, and fires again after release. |
 | `tb_boot_ctrl.sv` | `loader_reset` is a power-on one-shot (a late unlock does not re-arm it), the watchdog asserts `loader_abort`, and `boot_ready` needs all four terms. |
 | `tb_pk_io_paths.sv` | `pk_io` finishes on the exact byte count, finishes on APF command `0x008F` when the image is short, and releases `ioctl_download` on abort. |
+| `tb_disk_batch.sv` | `pk_io` does not close an ATA read batch until every halfword of it has arrived. `done` alone is not enough: `ki_ata` marks the whole batch valid on the falling edge of `sd_ack` (`ki_ata.sv:497`), so an early close hands the CPU sectors that were never written. |
 | `tb_loader_e2e.sv` | The full `pk_io -> ki_memory_bridge -> ki_sdram_adapter -> ki_sdram_burst` download path drains a 64 KiB image and raises `boot_loaded`. |
 
 The benches use a behavioural `dcfifo` and a minimal SDRAM device model. They

@@ -29,6 +29,10 @@ run tb_pk_io_paths \
 	tests/sim/dcfifo_model.sv tests/sim/tb_pk_io_paths.sv \
 	src/fpga/pocket_rtl/pk_io.sv
 
+run tb_disk_batch \
+	tests/sim/dcfifo_model.sv tests/sim/tb_disk_batch.sv \
+	src/fpga/pocket_rtl/pk_io.sv
+
 # Data integrity through the real memory path. -P sweeps the SDRAM model's read
 # latency; see tests/sim/README.md for what this bench does and does not prove.
 run tb_readback \
