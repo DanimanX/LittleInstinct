@@ -505,7 +505,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="1";
+          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="2";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -879,7 +879,7 @@ module ki_debug_screen #(
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
           9: trace_char="V"; 10: trace_char="1"; 11: trace_char="7";
-          12: trace_char="1";
+          12: trace_char="2";
           default: trace_char=" ";
         endcase
         1, 2, 3, 4, 5, 6, 7, 8: begin

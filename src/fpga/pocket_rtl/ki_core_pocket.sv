@@ -941,6 +941,13 @@ wire dcs_rom_ready;
 wire [63:0] dcs_rom_data;
 wire signed [15:0] dcs_audio;
 wire dcs_host_reset = core_reset | ~sound_reset;
+reg [15:0] dcs_rom_rdy_count = 16'd0;
+always @(posedge clk_core) begin
+	if (dcs_host_reset)
+		dcs_rom_rdy_count <= 16'd0;
+	else if (dcs_rom_ready && dcs_rom_rdy_count != 16'hFFFF)
+		dcs_rom_rdy_count <= dcs_rom_rdy_count + 16'd1;
+end
 
 reg debug_vblank_cpu_meta = 1'b0;
 reg debug_vblank_cpu_sync = 1'b0;
@@ -1800,9 +1807,9 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(debug_dep_op_hold),
+		.cpu_prev_op(debug_dep_valid_sync ? debug_dep_op_hold : {dcs_rom_rdy_count, dcs_rom_request, dcs_rom_ready, 1'b0, dcs_rom_address[12:0]}),
 		.cpu_ret_prev(debug_boot_summary),
-		.cpu_eret_flags({16'd0, dcs_host_status}),
+		.cpu_eret_flags({debug_ata_info_sync[31:21], ata_irq, cpu_irq[1], cpu_irq[0], sound_reset, dcs_host_reset, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),
 		.cpu_ret_pc(debug_loader_summary),
 		.pcm_health(dcs_pcm_health),
@@ -1816,7 +1823,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// in clk_core. Bits 6:2 contain ExcCode.
 		.reset_info({24'd0, debug_dep_cause_hold}),
 		.reset_first(debug_reset_first),
-		.ata_info(debug_dep_pc_hold),
+		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
 		.video_max_v_count(video_max_v_count),
 		.video_vblank_seen(video_vblank_seen),
