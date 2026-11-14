@@ -20,6 +20,10 @@ references/
 roms/*
 !roms/README.md
 *.7z
+
+# disk-image vectors for tb_disk_data: bytes taken from the game's own disk
+# image, same rule as roms/. Regenerate with tools/gen_disk_vectors.py.
+tests/sim/vectors/
 src/fpga/c5_pin_model_dump.txt
 src/seed*/
 *.log
