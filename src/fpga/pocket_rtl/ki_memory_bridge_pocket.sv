@@ -1154,8 +1154,11 @@ module ki_memory_bridge #(
                 // it, so the next 31 byte reads of that line cost nothing on
                 // the SDRAM bus.
                 cpu_grant <= 1'b1;
-                boot_rom_return_state <=
-                    rom_line_hit ? ROM_LINE_RETURN : ROM_LINE_FILL_ISSUE;
+                // if/else rather than a ternary between the two enum literals:
+                // Icarus demands an explicit cast for that shape and Quartus
+                // does not, which kept this file out of the simulation suite.
+                if (rom_line_hit) boot_rom_return_state <= ROM_LINE_RETURN;
+                else              boot_rom_return_state <= ROM_LINE_FILL_ISSUE;
                 boot_rom_wait_cycles <=
                     {active_read_words, {BOOT_ROM_WAIT_SHIFT{1'b0}}};
                 state <= BOOT_ROM_ACCESS_WAIT;
