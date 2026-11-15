@@ -71,6 +71,12 @@ Board time is 4 ms at 50 MHz; the DSP retires one instruction per
 
 ## What this means for the port
 
+> **Superseded in part.** Points 2-3 below describe a run in which the DSP was
+> stuck *before* its poll loop, on an empty DO (`0x14044E`) the sequencer could
+> not leave. That is fixed (see "Update: the DSP was stuck on a decode defect");
+> with the fix the poll block runs and the conclusions about `0x1FCA` still
+> hold. The text is kept as the order of events, not as the current state.
+
 The DCS subsystem is not silent because the audio path is broken. It is silent
 because **no mailbox command has ever been delivered in the bench, and every
 sweep of candidate command words still leaves the DSP in the poll loop**:
@@ -410,204 +416,6 @@ Also measured: with the empty DO skipped, execution reaches the poll block at
 both ways, `astat` ends with only Z set). So whatever makes the DSP wait lives
 inside 0x45..0x48 and not in the crossing back.
 
-
-## Verified against the ADSP-2100 Family User's Manual
-
-Source: *ADSP-2100 Family User's Manual*, 3rd ed. (September 1995), Chapter 3
-("Program Sequencer") and Section 15 (Instruction Set Reference). The text used
-here came from the archive.org scan; the PDF at analog.com was not reachable
-from this machine.
-
-**Conditional JUMP/CALL, direct (Instruction Type 10):**
-
-```
-23 22 21 20 19 18 17 16 ... 4 | 3 ... 0
- 0  0  0  1  1  C?  ADDR(14 bits)  COND(4)
-```
-
-> "For direct addressing ... the program address is stored directly in the
-> instruction word as a **full 14-bit field**."
-
-and, for the mechanism:
-
-> "The 14-bit jump address is embedded in the JUMP instruction word. When a
-> JUMP instruction is decoded, the jump address is input directly to the next
-> address mux of the program sequencer."
-
-So the target is an **absolute 14-bit page address**, not a displacement. The
-model's decode (`tgt = op[17:4]`, `pc <= tgt`) is correct.
-
-**DO UNTIL:** the manual describes the loop comparator as testing the *last
-instruction address embedded in the DO*, with "the address of the first
-instruction in the loop ... maintained on the top of the PC stack". It says
-nothing about a DO whose end equals its own first body instruction - that
-encoding has no instruction to test at all, which is why the model got stuck.
-
-**Decoding the three words that matter:**
-
-```
-043  14044E   DO 0x044 UNTIL NOT CE     (body = 0x044, one instruction)
-047  180F41   JUMP 0x0F4 IF NE          (absolute)
-153  18153F   JUMP 0x153 IF TRUE        (absolute; 0x0F4 in-field is the target)
-```
-
-That last one is the interesting one: `0x18153F` looks **self-referential**
-under absolute addressing (`0x153 + 0x3F` = read as a field gives 0x153). It
-sits at the address the run reaches after the poll block in one of the
-experiments, which matches an intentional wait/return idiom better than a bug.
-
-**What this closes and what it does not.** The jump encoding question is closed:
-absolute, as the model already had it. The earlier "jumps to 0x0F88" note was
-wrong on two counts (wrong base, wrong arithmetic) and stays retracted. What is
-*not* established is why the DSP does not leave the poll block; that is a
-question about `0x1FCA` and the loop's conditions, not about decoding.
-
-
-### The encoding is not settled after all
-
-The paragraph above reads the manual correctly and then overlooks one thing:
-the same manual also documents **Instruction Type 7, "JUMP/CALL with optional
-computed address fields"**, whose `DMOVLAY`/`PMOVLAY` bit fields, counted from
-bit 4, spell out *DERIVED ENDING OF DO LOOP*. So it is not established that
-every `0x18` word carries a JUMP target at `[17:4]`.
-
-The boot page itself points the other way. Every jump in it that names a loop
-end:
-
-```
-000  18154F   field 0x154   absolute 0x154   ""
-010  18554F   same field    same            ""
-01C  18154F   same field    same            ""
-01F  18154F   same field    same            ""
-153  18153F   field 0x153 = its own address  <- a self loop, if absolute
-```
-
-Three different jumps carrying the **same field `0x154`** do not look like three
-copies of the same destination; they look like the same modifier bit applied to
-different addresses. And `0x18153F` - self-referential under the absolute rule,
-with the DSP stopping there in one measured run - is not explained by it.
-
-So: **the manual gives the absolute rule for Type 10, and the boot page does not
-fit it.** The reading that fits is the overlay/derived-ending form, which the
-model does not implement. This is the open question now; the earlier retraction
-of "jumps past the page" stands, and nothing in the RTL was changed on the
-strength of either reading.
-
-
-### Fixed against the manual: the condition-code table
-
-The manual's Table 15.9 (and 15.8) gives the condition encoding as:
-
-```
-0 EQ   1 NE   2 LT   3 GE   4 LE   5 GT
-6 AC   7 NOT AC   8 AV   9 NOT AV
-A MV   B NOT MV   C NEG  D POS   E NOT CE   F (none)  /* F = unconditional */
-```
-
-The model's `cond_true` had a different table from 0x2 upwards - `0x2` was GT
-instead of LT, `0x4`/`0x5` were swapped, MV and NEG were misplaced. It has been
-replaced with the manual's. Measured effect on the boot: none in the 4 ms run -
-the poll loop's `JUMP` takes condition `0x1` (NE), where both tables agree - but
-every other conditional branch in the firmware was being evaluated with the
-wrong flag pair, and several conditions were in the wrong place entirely.
-
-`run.sh`: 24 PASS, 0 FAIL after the change.
-
-
-## The CPU bench: the branch rule the model uses
-
-From the *MIPS R4000 Microprocessor User's Manual*, "Overview of Branch
-Instructions":
-
-> All branch instruction target addresses are computed by adding the address of
-> the instruction **in the delay slot** to the 16-bit offset (shifted left 2
-> bits and sign-extended). All branches occur with a delay of one instruction.
-
-And, for the fetch, the JTYPE rule: the 26-bit field shifts left 2 and combines
-with the **high 4 bits of the current PC**.
-
-The model (`cpu_pocket.vhd`, the branch adder and `FetchAddr1`) does:
-
-```vhdl
-PCnextBranch <= pcOld0(63 downto 28) & (pcOld0(28 downto 0) +
-                unsigned((resize(signed(decodeImmData), 27) & "00")));
-```
-
-so its base is `PCold0`, which is the **fetch address of the instruction being
-decoded** (`PCold0 <= FetchAddr`), not that address plus four. VHDL is
-case-insensitive, so `pcOld0` and `PCold0` are the same signal; the code
-compiles and reads as two different things, which is how this survived.
-
-That is a hypothesis for the `0xB4012454` landing, not yet a measurement: the
-bench shows the CPU reaching a jump target that is not the next instruction but
-does not yet identify the branch. Confirming it needs the retired-instruction
-trace at the branch, which the bench now has (see below) and which has not been
-run with this instrumentation.
-
-
-### What the CPU bench can and cannot prove
-
-A correction to the section above: the bench's memory responder answers every
-`ddr3_DOUT` read out of the boot-ROM array, instruction fetches and data loads
-alike. That is the right shape for a core that reads instructions and data down
-one bus, but it means an instruction fetch can return boot-ROM bytes while the
-program expects an opcode, and a data load can return an opcode. The bench
-therefore cannot distinguish "the CPU mis-decodes" from "the bench served the
-wrong byte", and the `0xB4012454` landing is not evidence either way.
-
-Measured consequence: the run still stops at the same PC with the same COP0
-cause with the bench documented correctly and `run_cpu.sh` unchanged, so nothing
-was fixed. What was fixed is the claim: the bench is a memory-path bench, not a
-CPU-execution bench, and treating it as the latter produced the wrong diagnosis
-twice.
-
-To turn it into an execution bench it needs a fetch path the core actually uses:
-either INSTRCACHEON off end to end (a `ki_cpu_core` generic the Pocket ties
-high) or an instruction-cache model behind `cache_data`/`cache_data_ready`. That
-is a bench project of its own.
-
-## New: the jump word and the CPU bench
-
-Reading the two unresolved items against each other turned up what may be the
-same defect twice:
-
-**The jump word itself.** `0x180F41` at pc 0x47 has `op[18] = 0`, which the model
-reads as "conditional JUMP", and a 4-bit field `0x1` as its condition. `0x1` is
-`!Z`. It also carries a 12-bit field `0x0F4`. A jump that takes a 4-bit condition
-*and* a second, contradicting operand in the same word is not a shape the model
-handles: it evaluates `!Z` and ignores `0x0F4`. Whether the real encoding is
-page-relative, `0x0F4`-as-target, or a different instruction class is **still
-not established** — but note what it looks like next to the item below.
-
-**The CPU bench's failure has the same shape.** With the boot image fixed by the
-program above, the first 10 retired instructions of `tb_cpu_mem` decode
-correctly (`lui $sp`, `ori $sp`, `lui $t0`, `ori $t0`, `lui $t1`, `ori $t1`,
-`sw`, `lw`, `bne`, nop) and then the CPU is at `0xB4012454`, having written
-0x09004915 through the `bne`'s delay slot area. `0xB401...` is a jump target:
-the CPU took a branch to an address computed from an instruction word. `errors`
-stays 0 and COP0's `cause_live` shows ExcCode 2 (TLB miss); the run then times
-out at PC `B40128FC`, retired 0x136, on an address that walks forward 4 bytes a
-time — not an infinite loop, an endless instruction stream through unmapped
-memory.
-
-Two candidates, both testable without hardware:
-
-1. the 0xBFC00000 boot region is not backed for *instruction* fetches the way
-   the bench's responder assumes, so the fetch after the branch reads zeros;
-2. a branch displacement is applied relative to an instruction word rather than
-   to the address (the same category of defect as the jump word above).
-
-The bench's timeout line now prints `errors`, `cause_live` and `exc` so the next
-run does not need this instrumentation again.
-
-## What the bench showed about the model itself (side result)
-
-Per-instruction unit tests of the model were attempted and set aside: its
-sequencer and behavioral PM do not agree on instruction boundaries when a
-testbench pokes `pc`/`state` from outside, so such a bench is not trustworthy
-without OSD-style debug ports. No claim here depends on it; everything above
-comes from whole-program runs, which are self-consistent.
-
 ## Costs seen while measuring
 
 The model is heavy for Icarus: 4 ms of board time takes about a minute of host
@@ -621,3 +429,4 @@ Waves are unusable at this size; the bench prints its own timeline instead.
   therefore made from the outside, through retired-instruction strobes.
 - The bench does not send a real DCS command: the mailbox word format is not
   documented in this tree, so the variant-2 command is a placeholder.
+
