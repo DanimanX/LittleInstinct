@@ -718,6 +718,7 @@ reg  [31:0] debug_ds_first_meta = 32'd0, debug_ds_first_sync = 32'd0;
 // screen does.
 wire [31:0] dcs_pcm_health;
 wire [31:0] dcs_pcm_level;
+wire [13:0] dcs_dbg_pc;
 reg  [31:0] debug_eret_epc_meta = 32'd0,      debug_eret_epc_sync = 32'd0;
 reg  [31:0] debug_eret_target_meta = 32'd0,   debug_eret_target_sync = 32'd0;
 reg  [31:0] debug_eret_flags_meta = 32'd0,    debug_eret_flags_sync = 32'd0;
@@ -1521,20 +1522,71 @@ ki_sdram_bist #(.WORDS(256)) sdram_bist
 	.first_bad_actual(bist_first_bad_actual)
 );
 `else
-// No self test: the CPU starts as soon as the ROM is loaded and the SDRAM is
-// ready, and the adapter's auxiliary port stays idle.
-assign bist_busy = 1'b0;
-assign bist_done = 1'b1;
-assign bist_pass = 1'b1;
-assign bist_error_count = 16'd0;
-assign bist_first_bad_expected = 16'd0;
-assign bist_first_bad_actual = 16'd0;
-assign bist_sdram_address = 25'd0;
-assign bist_sdram_write_data = 64'd0;
-assign bist_sdram_byte_enable = 8'd0;
-assign bist_sdram_burst = 5'd0;
-assign bist_sdram_read = 1'b0;
-assign bist_sdram_write = 1'b0;
+// Tiny 4-word SDRAM probe targeting Main RAM 0x0808_7000 (word 25'h00C3800)
+// to test silicon read/write integrity at the failing stack region.
+reg [1:0]  probe_state = 2'd0;
+reg        probe_busy = 1'b0;
+reg        probe_done = 1'b0;
+reg        probe_pass = 1'b0;
+reg        probe_wr = 1'b0;
+reg        probe_rd = 1'b0;
+reg        probe_got_lo = 1'b0;
+reg [31:0] probe_lo = 32'd0;
+reg [15:0] probe_bad_actual = 16'd0;
+
+always @(posedge clk_core) begin
+	probe_wr <= 1'b0;
+	probe_rd <= 1'b0;
+	if (shell_reset) begin
+		probe_state <= 2'd0;
+		probe_busy <= 1'b0;
+		probe_done <= 1'b0;
+		probe_pass <= 1'b0;
+		probe_got_lo <= 1'b0;
+		probe_lo <= 32'd0;
+		probe_bad_actual <= 16'd0;
+	end else begin
+		case (probe_state)
+			2'd0: if (sdram_ready && boot_loaded && !probe_done) begin
+				probe_busy <= 1'b1;
+				probe_wr <= 1'b1;
+				probe_state <= 2'd1;
+			end
+			2'd1: if (bist_sdram_done) begin
+				probe_rd <= 1'b1;
+				probe_got_lo <= 1'b0;
+				probe_state <= 2'd2;
+			end
+			2'd2: begin
+				if (bist_sdram_data_valid && !probe_got_lo) begin
+					probe_lo <= bist_sdram_read_data;
+					probe_got_lo <= 1'b1;
+				end
+				if (bist_sdram_done) begin
+					probe_pass <= probe_got_lo && (probe_lo == 32'h1234_5678);
+					probe_bad_actual <= probe_lo[15:0];
+					probe_busy <= 1'b0;
+					probe_done <= 1'b1;
+					probe_state <= 2'd3;
+				end
+			end
+			default: ;
+		endcase
+	end
+end
+
+assign bist_busy = probe_busy;
+assign bist_done = probe_done;
+assign bist_pass = probe_pass;
+assign bist_error_count = probe_pass ? 16'd0 : 16'd1;
+assign bist_first_bad_expected = 16'h5678;
+assign bist_first_bad_actual = probe_bad_actual;
+assign bist_sdram_address = 25'h00C3800;
+assign bist_sdram_write_data = 64'hCAFE_BABE_1234_5678;
+assign bist_sdram_byte_enable = 8'hff;
+assign bist_sdram_burst = 5'd4;
+assign bist_sdram_read = probe_rd;
+assign bist_sdram_write = probe_wr;
 `endif
 
 wire [15:0] debug_adapter_status;
@@ -1716,7 +1768,7 @@ ki_dcs_audio dcs_audio_board
 	.dbg_valid(),
 	.dbg_unimpl(),
 	.dbg_pcm_push(),
-	.dbg_pc(),
+	.dbg_pc(dcs_dbg_pc),
 	.dbg_pcm_health(dcs_pcm_health),
 	.dbg_pcm_level(dcs_pcm_level)
 );
@@ -1872,7 +1924,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_eret_flags({debug_ata_info_sync[31:21], ata_irq, cpu_irq[1], cpu_irq[0], sound_reset, dcs_host_reset, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),
 		.cpu_ret_pc(debug_loader_summary),
-		.pcm_health(dcs_pcm_health),
+		.pcm_health((dcs_pcm_health[19:0] != 20'd0) ? dcs_pcm_health : {12'd0, 2'b10, 4'd0, dcs_dbg_pc}),
 		// {23 unused, departure valid, 6 unused, 2-bit trigger} - the page reads
 		// bit 8 as V and bits 7:0 as C, so this shows V:1 and C:01 / C:10 once a
 		// departure has been captured, and V:0 before that.

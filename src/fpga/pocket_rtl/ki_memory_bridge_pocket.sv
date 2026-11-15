@@ -1099,8 +1099,11 @@ module ki_memory_bridge #(
               read_buffer <= 64'd0;
               read_word_index <= 2'd0;
               read_words_remaining <= active_read_words;
-              line_read <= active_req64 && (active_read_words == 5'd16) &&
-                           (active_first_word[3:0] == 4'd0);
+              // Do not raise cpu_done early on the one-but-last beat; doing so
+              // clears datacache_active/ram_active in cpu_pocket before the 4th beat
+              // is written into the D-cache RAM, causing beat 4 (bytes 24..31) to be
+              // dropped on line fills. Every burst finishes cleanly on read_words_left_next == 0.
+              line_read <= 1'b0;
               fill_beat <= 2'd0;
               // Framebuffer access routed to SDRAM
               if (cpu_hits_fb) begin
