@@ -142,3 +142,39 @@ PK I/O paths, disk batch and data, readback, loader end-to-end).
 2. **SPORT1 autobuffer path.** It has never been exercised with real samples in
    the bench; the DSP never gets there today.
 3. **The instruction-fetch bench**, if the CPU is to be trusted at all.
+
+---
+
+## 7. The MAC pipeline: measured, before any RTL change
+
+Question: what does splitting the ADSP multiply-accumulate across registers
+cost, when it is what closes the −3.017 ns setup violation?
+
+Method: two standalone modules in `build/mac_stub/` (git-ignored), the same
+arithmetic as `mac_r48_f`, identical port lists, both sides registered, fitted
+alone on `5CEBA4F23C8` with `AGGRESSIVE AREA` and timed at a 20 ns clock:
+
+| Structure | ALMs | Registers | LABs | DSP | Worst slack @ 20 ns |
+|---|---|---|---|---|---|
+| one clock (today) | 100 | 48 | 14 | 2 | **+2.545 ns** |
+| four registers deep | 162 | 419 | 69 | 2 | **+10.375 ns** |
+
+So the pipeline buys **7.8 ns of slack and costs 62 ALMs and 55 LABs**
+for the MAC alone. Two caveats that matter more than the numbers:
+
+- The isolated block is not the real cone. Where the real one launches from
+  `mstat[0]` and `op_r[12]`, this stub launches from a plain operand register,
+  so "closes at 20 ns" here does not mean the design closes.
+- The full design has **227 ALM and 2 LAB of margin**. 62 ALMs might fit; 55
+  LABs cannot.
+
+That last line is the result: **restructuring the MAC is not a fix the current
+fit can absorb** unless something else gives up 55 LABs first. The levers for
+that are in `docs/REENGINEERING.md` §6, and the framebuffer is the large one.
+
+Reproduce (both need Quartus on PATH):
+
+```
+cd build/mac_stub/comb && quartus_sh --flow compile p && quartus_sta -t sta.tcl
+cd build/mac_stub/pipe && quartus_sh --flow compile p && quartus_sta -t sta.tcl
+```
