@@ -1084,11 +1084,11 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     //     S_EXEC once stage 3 is latched.
     //   * RTS/RTI and every non-MAC never see mac_stage != 0 (S_EXEC resets
     //     it), so their DECODE -> EXEC handoff and commit clock are unchanged.
-    reg        [15:0] mac_x_e, mac_y_e;   // R1 operands (sign-resolved)
+    reg signed [16:0] mac_x_e, mac_y_e;   // R1 operands (17b signed: covers S16 and U16)
     reg               mac_sh_e, mac_rnd_e;
     reg        [1:0]  mac_acc_e;
     reg        [47:0] mac_mr_e;           // R1 snapshot of {MR2,MR1,MR0}
-    reg        [31:0] mac_p_e;            // R2 product
+    reg signed [31:0] mac_p_e;            // R2 product (int32, matches mac_r48_f)
     reg        [47:0] mac_acc48_e;        // R3 accumulate + round (R4 reads this)
     // R1: issue this instruction's MAC from the current fetch registers. The
     // current opcode drives the operand selects, exactly as mac_r48_f reads
@@ -1106,8 +1106,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             endcase
             xv = mac_xread(fetch_q[10:8]);
             yv = mac_yread(fetch_q[12:11]);
-            mac_x_e <= xs ? $signed({{16{xv[15]}}, xv}) : $signed({16'b0, xv});
-            mac_y_e <= ys ? $signed({{16{yv[15]}}, yv}) : $signed({16'b0, yv});
+            mac_x_e <= xs ? $signed({xv[15], xv}) : $signed({1'b0, xv});
+            mac_y_e <= ys ? $signed({yv[15], yv}) : $signed({1'b0, yv});
             case (fetch_q[16:13])  // accumulate mode (same table as mac_r48_f)
               4'h2,4'h8,4'h9,4'hA,4'hB: mac_acc_e <= 2'd1; // MR + X*Y
               4'h3,4'hC,4'hD,4'hE,4'hF: mac_acc_e <= 2'd2; // MR - X*Y
@@ -1687,8 +1687,10 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             //      above advances the stage each clock; once R3 (mac_acc48_e) is
             //      latched the next clock is S_EXEC, so the commit always sees
             //      its own instruction's result.
-            mac_hold <= 1'b0;
-            if (mac_stage == 2'd3) state <= S_EXEC;
+            if (mac_stage == 2'd3) begin
+                mac_hold <= 1'b0;
+                state    <= S_EXEC;
+            end
             end else if (reboot_pending) begin
             dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;   // discard in-flight progress
             // ---- SYSCONTROL soft-reboot: reset CPU, reload PM from CURRENT bank ----
