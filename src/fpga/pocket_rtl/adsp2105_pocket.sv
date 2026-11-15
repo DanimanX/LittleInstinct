@@ -112,6 +112,11 @@ module adsp2105 (
     reg [13:0] baseR [0:7];       // m_base
     reg [13:0] lmask [0:7];       // m_lmask
     reg [15:0] astat, mstat, sstat, imask, icntl, px;
+    // Live copy of MSTAT written LAST in every clock that writes mstat (see
+    // set_mstat), for the MAC pipeline's R4 commit. Only bit 5 is read here (the
+    // timer engine), so it leaves the mstat load/launch cone -- the one the
+    // fitter measured from mstat[0] -- untouched.
+    reg [15:0] mstat_core;
     // The non-g0 banked core registers keep both banks as 2-entry files
     // indexed by the same active-bank pointer (the MSTAT bank switch swaps the
     // whole core register set, including AF/MF/SB and the MR top half).
@@ -327,6 +332,9 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     // One instruction follows S_FETCH -> S_DECODE -> optional drain/divide/ROM/
     // memory stalls -> S_EXEC. S_BOOT holds the CPU during streaming boot DMA.
     // Reset, reboot, and interrupts branch from boundary-check states.
+    // `state` is 3 bits: 8 encodings. `mac_stage` (below) is the physical MAC
+    // wait state -- its non-zero state IS the pipeline being in flight -- so no
+    // 9th `state` value is needed and every original encoding is untouched.
     localparam [2:0] S_BOOT   = 3'd0,  // boot DMA streaming (boot_active)
                      S_FETCH  = 3'd1,  // present PC to the PM fetch port
                      S_DECODE = 3'd2,  // fetch_q valid: latch op + EA, dispatch
@@ -530,6 +538,17 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
         ((pre_dm_rd && pre_region != RG_LATCH && pre_region != RG_BANK) ||
          (pre_dm_wr && pre_region == RG_ALIAS) || pre_pm_rd)   ? 2'd1 : 2'd0;
 
+    // ---- MAC opcode pre-class (from the current fetch_q, no register) --------
+    // Every opcode class whose EXEC body reaches mac_wb(), i.e. hi in 0x20-0x7F
+    // with op[17]=0 (MAC half, not the ALU half); sub=op[16:13]==0 is MAC-NOP
+    // and commits nothing. That is 0x20-23 (cond MAC->MR), 0x24-27 (cond
+    // MAC->MF), 0x28-2F (MAC + register move), 0x50-5F (MAC + PM(I,M)) and
+    // 0x60-7F (MAC + DM(I,M)). Stage 1 of the 4-stage MAC pipeline (see "MAC
+    // pipeline" below) issues from S_DECODE of the CURRENT instruction, so the
+    // classification is combinational over fetch_q; nothing else can set it.
+    wire mac_op_now = (fetch_q[23:16] >= 8'h20) && (fetch_q[23:16] < 8'h80) &&
+                      !fetch_q[17] && (fetch_q[16:13] != 4'h0);
+
     // ---- S_DECODE latches ---------------------------------------------------
     // The pre-decode above is combinational over fetch_q (stable for the whole
     // instruction: the fetch port keeps re-reading pm[pc] and pc only moves at
@@ -585,12 +604,49 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     // free and memory is quiescent while the CPU is stalled. The architectural
     // commit remains in the retiring instruction's EXEC clock.
     reg        dr_done;        // stream complete; EXEC may commit
+    // ---- MAC pipeline stage counter ------------------------------------------
+    // 0 = idle, 1 = R1 latched (mac_x_e..mac_mr_e valid), 2 = R2 latched
+    // (mac_p_e), 3 = R3 latched (mac_acc48_e) and ready for S_EXEC.
+    reg [1:0]  mac_stage;
+    // MAC wait hold. `state` is unchanged during the wait (it stays S_DECODE,
+    // so nothing re-routes PM/DM/ROM below); this flag makes the S_DECODE
+    // case skip its dispatch and only look at mac_stage.
+    reg        mac_hold;
     integer    dr_idx;         // cycle j: capture sample j-1, issue read j
     integer    dr_acc;         // address accumulator using ab_reg semantics
     integer    dr_cnt;         // sample count latched at stream start
     reg [1:0]  dr_region;      // region of the in-flight read
     reg [15:0] dr_smp;         // captured sample
     wire        drain_pend  = ab_active && dac_slot_go;
+
+    // ---- MAC pipeline: the issue trigger ----------------------------------------
+    // A MAC's operands must reach R1 no later than the DECODE clock before its
+    // S_EXEC, because R2 and R3 each need one clock. The MAC opcodes owe no
+    // S_MEM stall of their own (mac_op_now implies 0x20-0x7F and the data
+    // read of a multi-function MAC costs exactly S_MEM, which is the one clock
+    // R2 needs), so the remaining path is:
+    //   DECODE (R1 here) -> [S_ROM / S_ROM+S_MEM] (R2) -> S_MEM or S_DECODE
+    //                      (R3) -> S_EXEC (R4)
+    // The only path with fewer than two clocks after DECODE is a direct
+    // DECODE -> EXEC handoff. That is what mac_stall_dec catches: it captures
+    // R1 and diverts the clock to S_FETCH, so the re-dispatch DECODE one clock
+    // later has mac_stage!=0, hands to EXEC only if R3 is ready, and otherwise
+    // waits through mac_hold (see the MAC wait note below).
+    //
+    // irq_seen mirrors the check-state IRQ condition *without* its S_FETCH
+    // exclusion, i.e. it is false on the S_FETCH clock, so a single pending IRQ
+    // pivots to its vector on the first DECODE clock and cannot pivot again on
+    // the re-dispatch clock -- which would otherwise hand a half-finished MAC
+    // to EXEC. Every signal read here is written only in this always block, and
+    // mac_stall_dec is only evaluated in S_DECODE, so it is race-free.
+    wire irq_seen = (state != S_FETCH) &&
+                    (((icntl[2] ? irq2_latch : irq2_line) && imask[5]) ||
+                     (irq1_pulse && imask[2]) ||
+                     (tim_irq_latch && imask[0]));
+    wire mac_stall_dec = (state == S_DECODE) && mac_op_now && !irq_seen &&
+                         !(reboot_pending || host_rst_r) &&
+                         !drain_pend && !pre_tx1_wr && !pre_bank_rd &&
+                         (mem_need == 2'd0) && (mac_stage == 2'd0);
     // S_DRAIN reuses the arm-time quotient ab_drain_cnt.
     wire [31:0] dr_cur      = (dr_idx == 0) ? {16'h0, iR[ab_ireg]} : dr_acc;
 
@@ -953,8 +1009,11 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     // dst_mf=0: MR destination; dst_mf=1: MF destination.
     // Product is a 32-bit int truncation `(xop*yop) << shift` sign-extended
     // into the 48-bit accumulate over the full {MR2,MR1,MR0}.
-    // Combinational MAC result generator, evaluated once per instruction into
-    // mac_r. MV flag and MR/MF writeback occur at call sites.
+    //
+    // This is the ORIGINAL single-clock MAC: multiply, 48-bit accumulate and
+    // round in one cone (it was fitted at -3.017 ns, every violating path in
+    // this block). It is kept as the executable specification the clocked
+    // pipeline below mirrors step by step; nothing calls it.
     function automatic [47:0] mac_r48_f(input [3:0] sub);
         reg [15:0] xv, yv; reg xs, ys; reg [1:0] acc; reg rnd, sh;
         reg signed [31:0] xe, ye, p32; reg signed [47:0] prod, r, mrold;
@@ -997,7 +1056,91 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
         end
     endfunction
 
-    reg signed [47:0] mac_r;
+    // ---- MAC pipeline: four stages (R1..R4), mac_stage tracks 0..3 --------
+    // One stage boundary per cpu_ce clock, like every architectural register:
+    //   stage 0 (idle)
+    //   stage 1  R1 latched in S_DECODE (mac_issue): operands with sign
+    //            resolved, accumulate mode / round / INTEGER shift decoded,
+    //            and a snapshot of pre-instruction {MR2,MR1,MR0}. These are
+    //            exactly the fields the fitter showed on the -3.017 ns launch
+    //            path (mstat[0], op_r[8] -> 32x32 multiply and 48-bit chain).
+    //   stage 2  R2: mac_p_e <= mac_x_e*mac_y_e (DSP block).
+    //   stage 3  R3: product sign-extended, 48-bit add/sub and the exact
+    //            mac_r48_f round (mac_r3) -> mac_acc48_e.
+    //   S_EXEC   R4: mac_wb writes MR/MF + MV from mac_acc48_e and resets
+    //            mac_stage to 0.
+    // Who advances what, so the count is exact on every path:
+    //   * R1 is captured the first time S_DECODE dispatches a MAC-class
+    //     opcode (mac_stall_dec). If nothing stalls between DECODE and EXEC
+    //     the dispatch diverts to S_FETCH, so the next DECODE (same pc, op_r
+    //     unchanged) captures nothing and hands to S_EXEC only when R1 has
+    //     finished -- see the MAC wait (mac_hold) below.
+    //   * R2 and R3 are produced by the counter itself (stage 1 -> 2 -> 3) on
+    //     consecutive cpu_ce clocks, so they are independent of how many
+    //     stall states the instruction walks through.
+    //   * Every transition into S_EXEC (from S_DECODE, S_DRAIN, S_DIV,
+    //     S_ROM, S_MEM) checks mac_stage: a MAC still in R1/R2 goes to the
+    //     MAC wait (mac_hold, S_DECODE's encoding kept) and only leaves for
+    //     S_EXEC once stage 3 is latched.
+    //   * RTS/RTI and every non-MAC never see mac_stage != 0 (S_EXEC resets
+    //     it), so their DECODE -> EXEC handoff and commit clock are unchanged.
+    reg        [15:0] mac_x_e, mac_y_e;   // R1 operands (sign-resolved)
+    reg               mac_sh_e, mac_rnd_e;
+    reg        [1:0]  mac_acc_e;
+    reg        [47:0] mac_mr_e;           // R1 snapshot of {MR2,MR1,MR0}
+    reg        [31:0] mac_p_e;            // R2 product
+    reg        [47:0] mac_acc48_e;        // R3 accumulate + round (R4 reads this)
+    // R1: issue this instruction's MAC from the current fetch registers. The
+    // current opcode drives the operand selects, exactly as mac_r48_f reads
+    // `op`; the bank pointer is mstat[0] of this DECODE clock.
+    task automatic mac_issue();
+        reg xs, ys;
+        reg [15:0] xv, yv;
+        begin
+            xs = 1'b0; ys = 1'b0;
+            case (fetch_q[16:13])
+              4'h1,4'h2,4'h3,4'h4,4'h8,4'hC: begin xs=1'b1; ys=1'b1; end // SS
+              4'h5,4'h9,4'hD:                begin xs=1'b1; ys=1'b0; end // SU
+              4'h6,4'hA,4'hE:                begin xs=1'b0; ys=1'b1; end // US
+              default:                       begin xs=1'b0; ys=1'b0; end // UU
+            endcase
+            xv = mac_xread(fetch_q[10:8]);
+            yv = mac_yread(fetch_q[12:11]);
+            mac_x_e <= xs ? $signed({{16{xv[15]}}, xv}) : $signed({16'b0, xv});
+            mac_y_e <= ys ? $signed({{16{yv[15]}}, yv}) : $signed({16'b0, yv});
+            case (fetch_q[16:13])  // accumulate mode (same table as mac_r48_f)
+              4'h2,4'h8,4'h9,4'hA,4'hB: mac_acc_e <= 2'd1; // MR + X*Y
+              4'h3,4'hC,4'hD,4'hE,4'hF: mac_acc_e <= 2'd2; // MR - X*Y
+              default:                  mac_acc_e <= 2'd0; // X*Y
+            endcase
+            mac_rnd_e    <= (fetch_q[16:13]==4'h1)||(fetch_q[16:13]==4'h2)||
+                            (fetch_q[16:13]==4'h3);
+            mac_sh_e     <= ~mstat[4];   // shift = INTEGER mode ? 0 : 1
+            mac_mr_e     <= {`G0(13), `G0(12), `G0(11)};  // pre-instruction MR
+        end
+    endtask
+    // R2 -> R3 stage registers. Registered (not a wire) so the 48-bit
+    // add/sub + round cone ends on mac_acc48_e, one stage before the commit:
+    // R4 in S_EXEC only fans out to MR/MF/ASTAT.
+    // The round is mac_r48_f's exact rule: add 0x8000, and when the
+    // pre-round product's low half is 0x8000 clear bit 16 (half to even).
+    // prod_w is the sign-extended 32-bit product, shifted left one outside
+    // INTEGER mode, byte for byte as in mac_r48_f.
+    task automatic mac_r3();
+        reg [47:0] prod_w, acc_w;
+        begin
+            prod_w = mac_sh_e ? {{16{mac_p_e[30]}}, mac_p_e[30:0], 1'b0}
+                              : {{16{mac_p_e[31]}}, mac_p_e};
+            acc_w  = (mac_acc_e == 2'd1) ? mac_mr_e + prod_w :
+                     (mac_acc_e == 2'd2) ? mac_mr_e - prod_w : prod_w;
+            if (mac_rnd_e) begin
+                acc_w = acc_w + 48'sh8000;
+                if (prod_w[15:0] == 16'h8000) acc_w[16] = 1'b0;
+            end
+            mac_acc48_e <= acc_w;
+        end
+    endtask
+
     reg        [31:0] alu_res;       // {astat_next[31:16], result[15:0]}
     reg        [31:0] shift_res_v;   // SR1:SR0 result for modes below 0xC
     reg        [15:0] shift_se_v, shift_sbr_v;
@@ -1030,17 +1173,20 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
         end
     endtask
 
-    // MAC writeback consumes shared mac_r. The sub!=0 guard implements MAC-NOP.
+    // MAC writeback consumes R3 (mac_acc48_e) in S_EXEC, i.e. the R4 commit.
+    // Call sites still pass the instruction's own sub/dst fields; the sub!=0
+    // guard still implements MAC-NOP, and mac_acc48_e is the value the
+    // pipeline latched for THIS instruction.
     task automatic mac_wb(input [3:0] sub, input dst_mf);
         begin
             if (sub != 4'h0) begin
                 if (dst_mf) begin
-                    `MF <= mac_r[31:16];        // MF destination; no MV
+                    `MF <= mac_acc48_e[31:16];      // MF destination; no MV
                 end else begin                  // overflow: res[39:31] not uniform
-                    if (mac_r[39:31] != 9'h000 && mac_r[39:31] != 9'h1ff) astat <= astat | 16'h0040; // set MV
+                    if (mac_acc48_e[39:31] != 9'h000 && mac_acc48_e[39:31] != 9'h1ff) astat <= astat | 16'h0040; // set MV
                     else                                                   astat <= astat & ~16'h0040; // clear MV
-                    `G0(11) <= mac_r[15:0]; `G0(12) <= mac_r[31:16];
-                    `G0(13) <= mac_r[47:32];
+                    `G0(11) <= mac_acc48_e[15:0]; `G0(12) <= mac_acc48_e[31:16];
+                    `G0(13) <= mac_acc48_e[47:32];
                 end
             end
         end
@@ -1215,7 +1361,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     // retargets the index rather than swapping storage.
     task automatic set_mstat(input [15:0] nm);
         begin
-            mstat <= nm;
+            mstat      <= nm;
+            mstat_core <= nm;   // last writer wins: this copy tracks the same NBA
         end
     endtask
 
@@ -1456,8 +1603,9 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             dbg_cmd_lost <= 8'h0; dbg_cmd_read <= 1'b0;
             dbg_w_prev_addr <= 16'h0; dbg_w_prev_val <= 16'h0; dbg_w_seen <= 1'b0;
             loop_sp <= 0; pc_sp <= 0; cntr_sp <= 0; cntr <= 14'h0;
-            astat<=0; mstat<=0; sstat<=0; imask<=0; icntl<=0; px<=0;
+            astat<=0; mstat_core<=0; mstat<=0; sstat<=0; imask<=0; icntl<=0; px<=0;
             afb[0]<=0; afb[1]<=0; mfb[0]<=0; mfb[1]<=0; sbb[0]<=0; sbb[1]<=0;
+            mac_stage<=2'd0; mac_hold<=1'b0;   // no MAC pipeline survives a CPU reset
             for (k=0;k<8;k=k+1) begin iR[k]<=0; mR[k]<=0; lR[k]<=0; baseR[k]<=0; lmask[k]<=14'h3fff; end
             for (k=0;k<32;k=k+1) gr[k]<=0;   // both banks
             for (k=0;k<4;k=k+1)  loop_end[k]<=NO_LOOP;
@@ -1520,13 +1668,35 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
           // instruction boundary in S_DECODE.
           S_DECODE, S_DRAIN, S_DIV, S_ROM, S_MEM: begin
             o_valid <= 1'b0;
-            if (reboot_pending) begin
+            // ---- MAC pipeline: R2 (stage 1) and R3 (stage 2), one per
+            //      clock. The stage counter walks 1 -> 2 -> 3 regardless of
+            //      which stall state this clock belongs to, so an in-flight
+            //      MAC reaches stage 3 in at most two clocks and then waits
+            //      there until S_EXEC commits it.
+            if (mac_stage == 2'd1) begin
+                mac_p_e   <= mac_x_e * mac_y_e;      // R2
+                mac_stage <= 2'd2;
+            end else if (mac_stage == 2'd2) begin
+                mac_r3();                            // R3 (mac_acc48_e)
+                mac_stage <= 2'd3;
+            end
+
+            if (mac_hold) begin
+            // ---- MAC wait (mac_hold keeps S_DECODE's encoding): no dispatch,
+            //      no retirement, no architectural change. The R2/R3 progression
+            //      above advances the stage each clock; once R3 (mac_acc48_e) is
+            //      latched the next clock is S_EXEC, so the commit always sees
+            //      its own instruction's result.
+            mac_hold <= 1'b0;
+            if (mac_stage == 2'd3) state <= S_EXEC;
+            end else if (reboot_pending) begin
             dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;   // discard in-flight progress
             // ---- SYSCONTROL soft-reboot: reset CPU, reload PM from CURRENT bank ----
             pc <= 14'h0000; o_valid <= 1'b0; o_unimpl <= 1'b0;
             loop_sp <= 0; pc_sp <= 0; cntr_sp <= 0; cntr <= 14'h0; stat_sp <= 0;
-            astat<=0; mstat<=0; sstat<=0; imask<=0; icntl<=0; px<=0;
+            astat<=0; mstat_core<=0; mstat<=0; sstat<=0; imask<=0; icntl<=0; px<=0;
             afb[0]<=0; afb[1]<=0; mfb[0]<=0; mfb[1]<=0; sbb[0]<=0; sbb[1]<=0;
+            mac_stage<=2'd0; mac_hold<=1'b0;   // no MAC pipeline survives a CPU reset
             for (k=0;k<8;k=k+1) begin iR[k]<=0; mR[k]<=0; lR[k]<=0; baseR[k]<=0; lmask[k]<=14'h3fff; end
             for (k=0;k<32;k=k+1) gr[k]<=0;   // both banks
             for (k=0;k<4;k=k+1)  loop_end[k]<=NO_LOOP;
@@ -1543,8 +1713,9 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             ab_active <= 1'b0; dac_slot_ctr <= 16'h0; dac_slot_go <= 1'b0;
             pc <= 14'h0000; o_valid <= 1'b0; o_unimpl <= 1'b0;
             loop_sp <= 0; pc_sp <= 0; cntr_sp <= 0; cntr <= 14'h0; stat_sp <= 0;
-            astat<=0; mstat<=0; sstat<=0; imask<=0; icntl<=0; px<=0;
+            astat<=0; mstat_core<=0; mstat<=0; sstat<=0; imask<=0; icntl<=0; px<=0;
             afb[0]<=0; afb[1]<=0; mfb[0]<=0; mfb[1]<=0; sbb[0]<=0; sbb[1]<=0;
+            mac_stage<=2'd0; mac_hold<=1'b0;   // no MAC pipeline survives a CPU reset
             for (k=0;k<8;k=k+1) begin iR[k]<=0; mR[k]<=0; lR[k]<=0; baseR[k]<=0; lmask[k]<=14'h3fff; end
             for (k=0;k<32;k=k+1) gr[k]<=0;   // both banks
             for (k=0;k<4;k=k+1)  loop_end[k]<=NO_LOOP;
@@ -1559,6 +1730,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             // persist (the reset touches neither the start count nor the
             // period) -- keep the live shadows too.
             tim_scale <= 9'd1; tim_scale_cnt <= 9'd1; tim_irq_latch <= 1'b0;
+            // NOTE: condition identical to irq_seen (the MAC issue trigger reads
+            // the same terms); keep them in step.
             end else if (((icntl[2] ? irq2_latch : irq2_line) && imask[5]) ||
                      (irq1_pulse && imask[2]) ||
                      (tim_irq_latch && imask[0])) begin
@@ -1631,11 +1804,21 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                     bank_rd_r  <= pre_bank_rd;
                     tx1_r      <= pre_tx1_wr;
                     mem_need_r <= mem_need;
+                    if (mac_op_now && (mac_stage == 2'd0))
+                        mac_issue();
                     if      (drain_pend && !dr_done)  state <= S_DRAIN;
                     else if (pre_tx1_wr && !div_done) state <= S_DIV;
                     else if (pre_bank_rd && !rom_rdy) state <= S_ROM;
                     else if (mem_need != 2'd0)        state <= S_MEM;
-                    else                              state <= S_EXEC;
+                    else if (mac_stall_dec) begin
+                        // MAC issue clock: R1 captured above, divert to S_FETCH.
+                        state <= S_FETCH;
+                    end
+                    else if (mac_op_now && (mac_stage != 2'd3)) begin
+                        // A MAC whose R1/R2 is still in flight: hold until R3.
+                        mac_hold <= 1'b1;
+                    end
+                    else state <= S_EXEC;
                 end
 
                 S_DRAIN: begin
@@ -1687,10 +1870,13 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             end else begin
                 dr_done   <= 1'b1;       // all captured; EXEC commits next
                 // Continue with the next-priority stall.
-                state     <= (tx1_r && !div_done)    ? S_DIV
-                           : (bank_rd_r && !rom_rdy) ? S_ROM
-                           : (mem_need_r != 2'd0)    ? S_MEM
-                           :                           S_EXEC;
+                if (tx1_r && !div_done)        state <= S_DIV;
+                else if (bank_rd_r && !rom_rdy) state <= S_ROM;
+                else if (mem_need_r != 2'd0)   state <= S_MEM;
+                else if (mac_op_now && (mac_stage != 2'd3)) begin
+                    state    <= S_DECODE;
+                    mac_hold <= 1'b1;
+                end else state <= S_EXEC;
             end
                 end
 
@@ -1720,9 +1906,12 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                 div_nd <= {div_nd[14:0], 1'b0};
                 if (div_i == 5'd16) begin
                     div_done <= 1'b1;
-                    state    <= (bank_rd_r && !rom_rdy) ? S_ROM
-                              : (mem_need_r != 2'd0)    ? S_MEM
-                              :                           S_EXEC;
+                    if (bank_rd_r && !rom_rdy)      state <= S_ROM;
+                    else if (mem_need_r != 2'd0)    state <= S_MEM;
+                    else if (mac_op_now && (mac_stage != 2'd3)) begin
+                        state    <= S_DECODE;
+                        mac_hold <= 1'b1;
+                    end else state <= S_EXEC;
                 end else
                     div_i    <= div_i + 5'd1;
             end
@@ -1736,8 +1925,13 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             //      simply abandons the request; dcs_mem completes the fill
             //      into the cache (ROM is constant) and re-serves the address
             //      re-issued after the vector.
-                    if (rom_rdy)
-                        state <= (mem_need_r != 2'd0) ? S_MEM : S_EXEC;
+                    if (rom_rdy) begin
+                        if (mem_need_r != 2'd0) state <= S_MEM;
+                        else if (mac_op_now && (mac_stage != 2'd3)) begin
+                            state    <= S_DECODE;
+                            mac_hold <= 1'b1;
+                        end else state <= S_EXEC;
+                    end
                 end
 
                 S_MEM: begin
@@ -1745,7 +1939,10 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             //      port(s) (address = the S_DECODE latches via the muxes; data
             //      valid next clock, consumed by S_EXEC). One clock; no
             //      architectural state changes or retirement.
-                    state <= S_EXEC;
+                    if (mac_op_now && (mac_stage != 2'd3)) begin
+                        state    <= S_DECODE;
+                        mac_hold <= 1'b1;
+                    end else state <= S_EXEC;
                 end
 
                 default: ;   // unreachable (outer case covers these five)
@@ -1803,7 +2000,7 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             //      scale*(period+1). Placed BEFORE the instruction body so a
             //      same-clock DM($3FFB-D) control write wins the NBA clash
             //      (overwrite semantics, same ordering rule as H10).
-            if (mstat[5]) begin
+            if (mstat_core[5]) begin
                 if (tim_scale_cnt <= 9'd1) begin
                     tim_scale_cnt <= tim_scale;
                     if (tim_count == 16'h0) begin
@@ -1857,6 +2054,10 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                 end
             end
             op = op_r;      // opcode latched at S_DECODE (== fetch_q)
+            // ---- MAC pipeline, R4: mac_wb below commits mac_acc48_e for THIS
+            //      instruction (a MAC can only reach S_EXEC with stage 3, see
+            //      the MAC wait); the pipeline is idle for the next one.
+            mac_stage <= 2'd0; mac_hold <= 1'b0;
 `ifndef SYNTHESIS
             // fetch_q re-reads pm[pc] every clock and pc/PM only move at EXEC,
             // so the S_DECODE latch must still equal the live fetch port here.
@@ -1869,7 +2070,9 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             hi = op[23:16];
 
             // -------- shared datapath, evaluated once per instruction --------
-            mac_r   = mac_r48_f(op[16:13]);
+            // The MAC is no longer combinational per call site: mac_wb reads
+            // mac_acc48_e, the R3/R4 stage latched for this instruction (see
+            // "MAC pipeline" above).
             alu_res = alu_eval(op[16:13], alu_xread(op[10:8]), alu_yread(op[12:11]));
             shift_eval(op[14:11], op[10:8], (hi==8'h0F) ? op[7:0] : `G0(9)[7:0],
                        shift_res_v, shift_se_v, shift_ss_v, shift_sbr_v,

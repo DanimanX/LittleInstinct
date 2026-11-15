@@ -176,6 +176,7 @@ module tb_adsp;
     longint     spins_since = 0;
     longint     spins = 0;
     longint     halt_retired = 0;
+    reg dbg_valid_q = 1'b0;
     always @(posedge clk) begin
         if (!rst && dbg_valid) begin
             if (dbg_valid_q || dbg_valid) begin
@@ -192,7 +193,6 @@ module tb_adsp;
         end
         dbg_valid_q <= !rst && dbg_valid;
     end
-    reg dbg_valid_q = 1'b0;
 
     // Timeline of pc changes (boot -> the address it settled on), so the route
     // through the program is visible without a wave dump.

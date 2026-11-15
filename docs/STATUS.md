@@ -199,3 +199,17 @@ Reproduce (both need Quartus on PATH):
 cd build/mac_stub/comb && quartus_sh --flow compile p && quartus_sta -t sta.tcl
 cd build/mac_stub/pipe && quartus_sh --flow compile p && quartus_sta -t sta.tcl
 ```
+
+### Full-design fit with pipelined MAC (2026-11-15)
+
+Implemented the staged MAC (`mac_stage`, `mac_hold`, `mac_issue()`, `mac_r3()` with round-half-to-even) in `src/fpga/pocket_rtl/adsp2105_pocket.sv` and compiled the full `pocket_ki` design in Quartus Prime 25.1 (`5CEBA4F23C8`):
+
+- **ALMs:** **18 051 / 18 480 (98 %)** (−202 ALMs vs. 18 253)
+- **Registers:** **17 103**
+- **DSP blocks:** **21 / 66 (32 %)** (−2 DSP blocks)
+- **Setup `clk_core` (`general[0]`):** **+0.290 ns** (`TNS 0.000`, closed; all clocks have positive setup slack).
+- **Hold:** Slow 85C closed; Fast 0C `general[5]` (`clk_sdram_cap`) remains open at **−0.180 ns** (`TNS −1.559`).
+- **SDC note:** `pocket_ki.sdc` already groups `u_pll` with `clk_74a` (`u_pll` → `general[0/1]` has 0 paths in STA); the note in `README.md` about `u_pll` being uncovered is stale.
+- **Packaged:** `Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r` (`356fb4d579a9447f29b1f11154eea562`).
+- **Still unverified in simulation:** `vlog` compiles `adsp2105_pocket.sv` and `tb_adsp.sv` with 0 errors, 0 warnings, but `vsim` has no license (`SALT_LICENSE_SERVER`) and `iverilog`/`ghdl` are not installed on this host.
+
