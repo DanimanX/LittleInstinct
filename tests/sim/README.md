@@ -102,6 +102,45 @@ write-data sequence by construction. Faults there are unambiguous, and it also
 covers the instruction cache, the pipeline and the load interlock, none of which
 this bench touches.
 
+## tb_cpu_mem (GHDL, not part of run.sh)
+
+`tb_cpu_mem.vhd` runs a real MIPS program on `ki_cpu_core` - the same wrapper,
+the same generics `ki_core_pocket.sv` uses - and asks whether a store survives
+the load that follows it, which is the shape of the fault being chased.
+
+```sh
+GHDL=/path/to/ghdl tests/sim/run_cpu.sh
+```
+
+The program loads a constant, stores it to 0x08001000, reads it back, and
+branches on inequality into a fail path; on success it writes 0x12345678 to
+0x10000000. The pass condition is that WRITE, made by the program, so it does
+not depend on the bench's reading of the cache's internals.
+
+`run_cpu.sh` compiles the whole core - caches, TLB, COP0, divider, multiplier -
+plus the two megafunction stand-ins. That in itself is new: before this, no
+open-source simulator had booted this CPU, and the CPU had only ever run under
+ModelSim.
+
+**Status: boots, does not pass.** What is established:
+
+- the CPU comes out of reset, fetches from 0xBFC00000 and retires instructions
+  in order (PC advances 0xBFC00008, 0x10, 0x18, 0x20 with retired 3, 5, 7, 9)
+- the instruction fetch needs the low-address word of a beat in the HIGH half
+  and byte-swapped, `{bswap(rom[A]), bswap(rom[A+4])}` in big-endian bus order.
+  Getting this backwards decodes the first fetch as a reserved instruction
+  (ExcCode 10) - which is what the first three runs reported
+
+What is not: the program diverges at the data path. It runs ~300 instructions
+and then the PC is wild (0xB40128FC), with no exception flagged, so the bench
+reports a timeout rather than a diagnosis. The store/load question is therefore
+still unanswered, and the memory responder in this bench is the prime suspect -
+not the CPU. It answers a fixed four beats per `mem_req64` request and pulses
+`cache_grant` per beat; whether that matches what the datacache expects of a
+demand fill has not been established.
+
+Do not read anything into the timeout beyond that.
+
 ## tb_readbacktb_readback
 
 `tb_readback.sv` writes a pattern to main RAM through the bridge's CPU port and
