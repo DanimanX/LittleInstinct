@@ -144,35 +144,39 @@ RTL's behaviour there has to be read instruction by instruction:
 042  3e7105   AR  = 0x2710 | CNTR  (0x3E = 14-bit immediate into grp3 idx 5)
 043  14044E   DO 0x44 UNTIL CE
 044  000000   NOP
-045  839FCA   AY0 = DM(0x1FCA) | 0x0800 | 0x0200 | 0x0100  (0x83 = read, immediate 0x1FCA)
-046  267A0F   conditional ALU into AF, condition 0x0F
-047  180F41   JUMP 0x0F88 if !Z
+045  839FCA   read into AY0 from the immediate address 0x1FCA (0x83 class)
+046  267A0F   ALU op into AF, condition 0x0F
+047  180F41   conditional JUMP, field 0x0F4, condition 0x1
 ```
 
-Two facts from that, both measured in the bench:
+What can be said without a decode table:
 
-- The loop cannot close through 0x42: the `JUMP` at 0x47 comes after the last
-  instruction of a one-body DO, so it leaves the loop. Between 0x45 and 0x47
-  there is no ADD or MAC, so Z can only be set by the 0x46 ALU op itself.
-- That op is either "AND with an implied 0" (Z set) or "the AF constant
-  unchanged" (Z follows AF). It is **not in the ADSP-2105 subset the model
-  implements**, as far as the encoding can tell; it reads 0 from the model and
-  a mask from the ROM. This needs the ADSP-2105 opcode table, not more
-  simulation.
+- The block at 0x42-0x48 **iterates**. The once-per-pc-change trace only shows
+  it entering; the poll loop is a wait loop around the `JUMP` at 0x47.
+- Where that `JUMP` goes is **not established**. Read as an absolute page
+  address the field gives 0x0F4; read as relative from 0x47 it gives 0x13B,
+  which is real code inside the page. The ADSP-2105's page-versus-relative rule
+  for class 0x18 decides it, and that has not been checked against a source
+  outside this tree. **Do not use either value as evidence.**
+- The model raises no `o_unimpl` and no internal `$fatal` anywhere in the run,
+  so the instruction stream is inside the implemented subset as the model
+  defines it.
+- `DM(0x1FCA)` reads 0 in the bench. Whether the image "should" give something
+  else depends on the DM-to-ROM mapping, which is also unverified.
 
-### How far the model can take this alone
+### What was claimed here and retracted
 
-The boot page is 376 words and the firmware's own code jumps past it (the
-`JUMP` at 0x47 targets 0x0F88). Everything from there on is read through the
-ROM window, and the model uses a **14-bit** PM (16 384 words = 64 KiB), so
-addresses beyond that wrap inside the model and the run cannot be followed.
-Widening PM needs 24-bit addresses from here through the whole core.
+An earlier revision of this section said the `JUMP` at 0x47 targets 0x0F88,
+that the firmware therefore jumps past its 376-word boot page, and that the
+model's 14-bit PM cannot follow it. That came from reading the 0x18 field as a
+page address *and* adding it to the wrong base. The ADSP-2105 jump encoding was
+never checked. Treat the sentence as withdrawn; the open question is the
+encoding, not the model's PM size.
 
-The two symptoms already collected (`DM(0x1FCA)` reads 0 where the image holds
-0xFF, and the 0x46 ALU op is not in the subset) are enough to say: the DCS
-board's silence is a **model/decoder gap**, not (yet) a hardware one.
+The same revision claimed the 0x46 ALU op "is not in the subset". The model does
+not strand on it (`o_unimpl` stays clear), so that claim is unsupported too.
 
-## What the bench showed about the model itself (side result)
+## What the bench showed about the model itself (side result)## What the bench showed about the model itself (side result)
 
 Per-instruction unit tests of the model were attempted and set aside: its
 sequencer and behavioral PM do not agree on instruction boundaries when a
