@@ -482,7 +482,7 @@ module ki_memory_bridge #(
   // Set to 0 to disable gathering without removing it (the eligibility test
   // folds to a constant), which is the first thing to try if hardware
   // misbehaves.
-  localparam logic WB_GATHER = 1'b1;
+  localparam logic WB_GATHER = 1'b0;
 
   logic   [2:0] wb_count = 3'd0;     // 64-bit chunks held, 0..4
   logic  [24:0] wb_addr = 25'd0;     // word address of the first chunk

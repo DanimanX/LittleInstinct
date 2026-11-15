@@ -1592,7 +1592,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
         dac_ce <= 1'b0;   // the autobuffer drain pulses it for one clock
         dbg_cmd_read <= 1'b0;  // default; the input-latch auto-ack pulses it
         if (rst) begin
-            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;   // clear stall progress
+            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;
+            mac_stage <= 2'd0; mac_hold <= 1'b0;   // clear stall progress
             pc <= 14'h0000; o_valid <= 1'b0; o_unimpl <= 1'b0; o_ppc <= 14'h0;
             dac_sample <= 16'h0;
             dbg_wrap_pc <= 14'h0; dbg_wrap_cnt <= 8'h0;
@@ -1691,7 +1692,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                 state    <= S_EXEC;
             end
             end else if (reboot_pending) begin
-            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;   // discard in-flight progress
+            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;
+            mac_stage <= 2'd0; mac_hold <= 1'b0;   // discard in-flight progress
             // ---- SYSCONTROL soft-reboot: reset CPU, reload PM from CURRENT bank ----
             pc <= 14'h0000; o_valid <= 1'b0; o_unimpl <= 1'b0;
             loop_sp <= 0; pc_sp <= 0; cntr_sp <= 0; cntr <= 14'h0; stat_sp <= 0;
@@ -1710,7 +1712,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                 // and reloads the boot page (it is not a full DCS reset), so
                 // tim_scale/count/period persist; enable dies with MSTAT<=0.
             end else if (host_rst_r) begin
-            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;   // discard in-flight progress
+            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;
+            mac_stage <= 2'd0; mac_hold <= 1'b0;   // discard in-flight progress
             ab_active <= 1'b0; dac_slot_ctr <= 16'h0; dac_slot_go <= 1'b0;
             pc <= 14'h0000; o_valid <= 1'b0; o_unimpl <= 1'b0;
             loop_sp <= 0; pc_sp <= 0; cntr_sp <= 0; cntr <= 14'h0; stat_sp <= 0;
@@ -1742,6 +1745,7 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
             // after the vector the boundary restarts and re-reads identical
             // values (memory is untouched; the drain commit never happened).
             dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;
+            mac_stage <= 2'd0; mac_hold <= 1'b0;
             // ---- generated interrupt ----------------------------------------
             // Interrupt check: IRQ2 first (level or latch per ICNTL bit2), then
             // IRQ1 (autobuffer-wrap pulse), then the TIMER (latch only, no
@@ -1794,9 +1798,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                     // instruction's own address (by S_EXEC pc has moved on:
                     // one clock of this FSM per state).
                     if ((fetch_q[23:16] == 8'h14) &&
-                        (({2'b0, fetch_q[17:4]} == pc) ||
-                         ({2'b0, fetch_q[17:4]} == (pc + 14'd1))))
-                        $display("WARNING: DO at pc=%04h ends on its own first instruction (0x%04h); not looping",
+                        ({2'b0, fetch_q[17:4]} == pc))
+                        $display("WARNING: DO at pc=%04h ends on itself (0x%04h); not looping",
                                  pc, fetch_q[17:4]);
 `endif
                     ea_addr_r  <= pre_addr;
@@ -1989,7 +1992,8 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
           // ================================================================
           S_EXEC: begin
             state <= S_FETCH;                 // consume; next clock re-fetches new PC
-            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;  // fresh progress for the next boundary
+            dr_done <= 1'b0; dr_idx <= 0; div_done <= 1'b0; div_i <= 5'd0;
+            mac_stage <= 2'd0; mac_hold <= 1'b0;  // fresh progress for the next boundary
             // -------- fetch --------
             o_ppc   <= pc;
             o_valid <= 1'b1;
@@ -2228,27 +2232,14 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
               end
 
               8'h14,8'h15,8'h16,8'h17: begin           // DO <addr> UNTIL <cond>
-                  // KI's boot page holds 0x14044E at 0x43: a DO whose end is
-                  // its own first body instruction. Pushing it makes the
-                  // sequencer jump to 0x44 and re-decode the DO before the
-                  // loop-end check can fire, parking the DSP on one
-                  // instruction for the rest of the run. Such a DO is not
-                  // pushed; its single body instruction runs once and
-                  // execution continues. Detection is by the DO's own address
-                  // latched at S_DECODE (do_pc): pc has already moved on here.
-                  //
-                  // The loop stack is deliberately NOT adjusted (see below):
-                  // it is also the return stack, and the rest of the boot
-                  // page's CALL/RTS sequence depends on its current depth - a
-                  // second RTS at 0x152 pops a saved state that the stack top
-                  // has to still be holding.
-                  if (op[17:4] != (do_pc + 14'd1)) begin
-                      loop_end [loop_sp] <= op[17:4];
-                      loop_cond[loop_sp] <= op[3:0];
-                      loop_sp            <= loop_sp + 1;
-                      pc_stack[pc_sp]    <= pc + 1'b1;  // loop top = next instr
-                      pc_sp              <= pc_sp + 1;
-                  end
+                  // Push loop end/condition and loop top (pc+1, which is the
+                  // first instruction of the loop body, even for 1-instruction
+                  // loops like 0x14044E at 0x43 where loop_end == do_pc + 1).
+                  loop_end [loop_sp] <= op[17:4];
+                  loop_cond[loop_sp] <= op[3:0];
+                  loop_sp            <= loop_sp + 1;
+                  pc_stack[pc_sp]    <= pc + 1'b1;      // loop top = next instr
+                  pc_sp              <= pc_sp + 1;
               end
 
               8'h18,8'h19,8'h1A,8'h1B,                  // conditional JUMP/CALL imm (op[18]=CALL)

@@ -1298,7 +1298,11 @@ ki_cpu_core #(
 	// responses in the return FIFO, and the boot ROM's cache-flush lw at
 	// 0xBFC00400 never saw its mem_done. That is the black screen.
 	.SYNC_CROSSING(0),
+	.DCACHE_SKIP_FILL(0),
 	.DCACHE_FB_PARTIAL(0),
+	.DCACHE_WB_EARLY(0),
+	.DCACHE_STORE_BUFFER(0),
+	.DCACHE_SB_FORWARD(0),
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
 	.DCACHE_FILL_AT_MISS(0),
