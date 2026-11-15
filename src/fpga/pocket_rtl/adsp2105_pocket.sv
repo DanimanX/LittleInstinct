@@ -1805,8 +1805,10 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                     bank_rd_r  <= pre_bank_rd;
                     tx1_r      <= pre_tx1_wr;
                     mem_need_r <= mem_need;
-                    if (mac_op_now && (mac_stage == 2'd0))
+                    if (mac_op_now && (mac_stage == 2'd0)) begin
                         mac_issue();
+                        mac_stage <= 2'd1;
+                    end
                     if      (drain_pend && !dr_done)  state <= S_DRAIN;
                     else if (pre_tx1_wr && !div_done) state <= S_DIV;
                     else if (pre_bank_rd && !rom_rdy) state <= S_ROM;
