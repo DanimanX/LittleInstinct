@@ -301,6 +301,37 @@ wrong flag pair, and several conditions were in the wrong place entirely.
 
 `run.sh`: 24 PASS, 0 FAIL after the change.
 
+
+## The CPU bench: the branch rule the model uses
+
+From the *MIPS R4000 Microprocessor User's Manual*, "Overview of Branch
+Instructions":
+
+> All branch instruction target addresses are computed by adding the address of
+> the instruction **in the delay slot** to the 16-bit offset (shifted left 2
+> bits and sign-extended). All branches occur with a delay of one instruction.
+
+And, for the fetch, the JTYPE rule: the 26-bit field shifts left 2 and combines
+with the **high 4 bits of the current PC**.
+
+The model (`cpu_pocket.vhd`, the branch adder and `FetchAddr1`) does:
+
+```vhdl
+PCnextBranch <= pcOld0(63 downto 28) & (pcOld0(28 downto 0) +
+                unsigned((resize(signed(decodeImmData), 27) & "00")));
+```
+
+so its base is `PCold0`, which is the **fetch address of the instruction being
+decoded** (`PCold0 <= FetchAddr`), not that address plus four. VHDL is
+case-insensitive, so `pcOld0` and `PCold0` are the same signal; the code
+compiles and reads as two different things, which is how this survived.
+
+That is a hypothesis for the `0xB4012454` landing, not yet a measurement: the
+bench shows the CPU reaching a jump target that is not the next instruction but
+does not yet identify the branch. Confirming it needs the retired-instruction
+trace at the branch, which the bench now has (see below) and which has not been
+run with this instrumentation.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
@@ -459,6 +490,37 @@ every other conditional branch in the firmware was being evaluated with the
 wrong flag pair, and several conditions were in the wrong place entirely.
 
 `run.sh`: 24 PASS, 0 FAIL after the change.
+
+
+## The CPU bench: the branch rule the model uses
+
+From the *MIPS R4000 Microprocessor User's Manual*, "Overview of Branch
+Instructions":
+
+> All branch instruction target addresses are computed by adding the address of
+> the instruction **in the delay slot** to the 16-bit offset (shifted left 2
+> bits and sign-extended). All branches occur with a delay of one instruction.
+
+And, for the fetch, the JTYPE rule: the 26-bit field shifts left 2 and combines
+with the **high 4 bits of the current PC**.
+
+The model (`cpu_pocket.vhd`, the branch adder and `FetchAddr1`) does:
+
+```vhdl
+PCnextBranch <= pcOld0(63 downto 28) & (pcOld0(28 downto 0) +
+                unsigned((resize(signed(decodeImmData), 27) & "00")));
+```
+
+so its base is `PCold0`, which is the **fetch address of the instruction being
+decoded** (`PCold0 <= FetchAddr`), not that address plus four. VHDL is
+case-insensitive, so `pcOld0` and `PCold0` are the same signal; the code
+compiles and reads as two different things, which is how this survived.
+
+That is a hypothesis for the `0xB4012454` landing, not yet a measurement: the
+bench shows the CPU reaching a jump target that is not the next instruction but
+does not yet identify the branch. Confirming it needs the retired-instruction
+trace at the branch, which the bench now has (see below) and which has not been
+run with this instrumentation.
 
 ## New: the jump word and the CPU bench
 
