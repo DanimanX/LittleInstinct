@@ -154,10 +154,13 @@ begin
    rom(21) <= x"0BF00054";  -- j     self
    rom(22) <= x"00000000";  -- nop
 
-   -- Exactly the generics ki_core_pocket.sv uses, so this is the CPU build the
-   -- Pocket runs: SYNC_CROSSING and DIRECT_FILL off, every DCACHE_* off, and
-   -- LOAD_INTERLOCK / UNC_FAST_DONE / LOAD_MERGE_BYPASS left at ki_cpu_core's
-   -- defaults of 1.
+   -- The Pocket's generics (SYNC_CROSSING and DIRECT_FILL off, every DCACHE_*
+   -- off, LOAD_INTERLOCK / UNC_FAST_DONE / LOAD_MERGE_BYPASS at ki_cpu_core's
+   -- defaults of 1). One difference from synthesis, and it is deliberate: this
+   -- bench does not serve the instruction cache, so it cannot stand in for one.
+   -- ki_core_pocket ties INSTRCACHEON high; a bench that answers SDRAM reads
+   -- cannot fill icache lines, and pretending otherwise is what made the earlier
+   -- runs read boot-ROM bytes as if they were instructions.
    dut : entity work.ki_cpu_core
    generic map
    (
@@ -242,6 +245,18 @@ begin
    -- pulse each, then mem_done - the order cpu_pocket.vhd documents for a cache
    -- fill ("beats in clk1x, the last one no later than mem_done"). For a write:
    -- capture and complete.
+   -- INSTRUCTION FETCHES. The core decodes whatever opcode its fetch path
+   -- hands it; with the instruction cache on, a branch needs the cache to be
+   -- coherent with the new PC, which this bench cannot provide (it answers
+   -- SDRAM reads, not icache line fills). Without the cache, every fetch is a
+   -- plain address-tagged read, so this bench measures the CPU's execution and
+   -- not the bench's ability to fill a cache.
+   --
+   -- (The earlier version relied on data reads posing as instruction fetches:
+   -- it answered every ddr3_DOUT read from the boot ROM, so an instruction
+   -- fetch pulled boot-ROM bytes while a data load pulled boot-ROM bytes too.
+   -- That is why the program "ran" ten instructions and then took a TLB fault
+   -- reading 0xB4012454: the opcode stream and the data had the same source.)
    mem : process (clk1x)
       variable addr    : unsigned(31 downto 0);
       variable beat    : integer := 0;

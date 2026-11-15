@@ -332,6 +332,28 @@ does not yet identify the branch. Confirming it needs the retired-instruction
 trace at the branch, which the bench now has (see below) and which has not been
 run with this instrumentation.
 
+
+### What the CPU bench can and cannot prove
+
+A correction to the section above: the bench's memory responder answers every
+`ddr3_DOUT` read out of the boot-ROM array, instruction fetches and data loads
+alike. That is the right shape for a core that reads instructions and data down
+one bus, but it means an instruction fetch can return boot-ROM bytes while the
+program expects an opcode, and a data load can return an opcode. The bench
+therefore cannot distinguish "the CPU mis-decodes" from "the bench served the
+wrong byte", and the `0xB4012454` landing is not evidence either way.
+
+Measured consequence: the run still stops at the same PC with the same COP0
+cause with the bench documented correctly and `run_cpu.sh` unchanged, so nothing
+was fixed. What was fixed is the claim: the bench is a memory-path bench, not a
+CPU-execution bench, and treating it as the latter produced the wrong diagnosis
+twice.
+
+To turn it into an execution bench it needs a fetch path the core actually uses:
+either INSTRCACHEON off end to end (a `ki_cpu_core` generic the Pocket ties
+high) or an instruction-cache model behind `cache_data`/`cache_data_ready`. That
+is a bench project of its own.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
@@ -521,6 +543,28 @@ bench shows the CPU reaching a jump target that is not the next instruction but
 does not yet identify the branch. Confirming it needs the retired-instruction
 trace at the branch, which the bench now has (see below) and which has not been
 run with this instrumentation.
+
+
+### What the CPU bench can and cannot prove
+
+A correction to the section above: the bench's memory responder answers every
+`ddr3_DOUT` read out of the boot-ROM array, instruction fetches and data loads
+alike. That is the right shape for a core that reads instructions and data down
+one bus, but it means an instruction fetch can return boot-ROM bytes while the
+program expects an opcode, and a data load can return an opcode. The bench
+therefore cannot distinguish "the CPU mis-decodes" from "the bench served the
+wrong byte", and the `0xB4012454` landing is not evidence either way.
+
+Measured consequence: the run still stops at the same PC with the same COP0
+cause with the bench documented correctly and `run_cpu.sh` unchanged, so nothing
+was fixed. What was fixed is the claim: the bench is a memory-path bench, not a
+CPU-execution bench, and treating it as the latter produced the wrong diagnosis
+twice.
+
+To turn it into an execution bench it needs a fetch path the core actually uses:
+either INSTRCACHEON off end to end (a `ki_cpu_core` generic the Pocket ties
+high) or an instruction-cache model behind `cache_data`/`cache_data_ready`. That
+is a bench project of its own.
 
 ## New: the jump word and the CPU bench
 
