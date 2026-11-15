@@ -250,6 +250,37 @@ wrong on two counts (wrong base, wrong arithmetic) and stays retracted. What is
 *not* established is why the DSP does not leave the poll block; that is a
 question about `0x1FCA` and the loop's conditions, not about decoding.
 
+
+### The encoding is not settled after all
+
+The paragraph above reads the manual correctly and then overlooks one thing:
+the same manual also documents **Instruction Type 7, "JUMP/CALL with optional
+computed address fields"**, whose `DMOVLAY`/`PMOVLAY` bit fields, counted from
+bit 4, spell out *DERIVED ENDING OF DO LOOP*. So it is not established that
+every `0x18` word carries a JUMP target at `[17:4]`.
+
+The boot page itself points the other way. Every jump in it that names a loop
+end:
+
+```
+000  18154F   field 0x154   absolute 0x154   ""
+010  18554F   same field    same            ""
+01C  18154F   same field    same            ""
+01F  18154F   same field    same            ""
+153  18153F   field 0x153 = its own address  <- a self loop, if absolute
+```
+
+Three different jumps carrying the **same field `0x154`** do not look like three
+copies of the same destination; they look like the same modifier bit applied to
+different addresses. And `0x18153F` - self-referential under the absolute rule,
+with the DSP stopping there in one measured run - is not explained by it.
+
+So: **the manual gives the absolute rule for Type 10, and the boot page does not
+fit it.** The reading that fits is the overlay/derived-ending form, which the
+model does not implement. This is the open question now; the earlier retraction
+of "jumps past the page" stands, and nothing in the RTL was changed on the
+strength of either reading.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
@@ -357,6 +388,37 @@ absolute, as the model already had it. The earlier "jumps to 0x0F88" note was
 wrong on two counts (wrong base, wrong arithmetic) and stays retracted. What is
 *not* established is why the DSP does not leave the poll block; that is a
 question about `0x1FCA` and the loop's conditions, not about decoding.
+
+
+### The encoding is not settled after all
+
+The paragraph above reads the manual correctly and then overlooks one thing:
+the same manual also documents **Instruction Type 7, "JUMP/CALL with optional
+computed address fields"**, whose `DMOVLAY`/`PMOVLAY` bit fields, counted from
+bit 4, spell out *DERIVED ENDING OF DO LOOP*. So it is not established that
+every `0x18` word carries a JUMP target at `[17:4]`.
+
+The boot page itself points the other way. Every jump in it that names a loop
+end:
+
+```
+000  18154F   field 0x154   absolute 0x154   ""
+010  18554F   same field    same            ""
+01C  18154F   same field    same            ""
+01F  18154F   same field    same            ""
+153  18153F   field 0x153 = its own address  <- a self loop, if absolute
+```
+
+Three different jumps carrying the **same field `0x154`** do not look like three
+copies of the same destination; they look like the same modifier bit applied to
+different addresses. And `0x18153F` - self-referential under the absolute rule,
+with the DSP stopping there in one measured run - is not explained by it.
+
+So: **the manual gives the absolute rule for Type 10, and the boot page does not
+fit it.** The reading that fits is the overlay/derived-ending form, which the
+model does not implement. This is the open question now; the earlier retraction
+of "jumps past the page" stands, and nothing in the RTL was changed on the
+strength of either reading.
 
 ## New: the jump word and the CPU bench
 
