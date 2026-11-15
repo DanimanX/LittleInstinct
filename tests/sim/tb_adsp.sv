@@ -199,16 +199,38 @@ module tb_adsp;
     integer tl_n = 0;
     always @(posedge clk) begin
         if (!rst && dbg_valid && (dbg_pc != halt_pc) && (tl_n < 64)) begin
-            $display("[tl] retired=%0d pc=%0h op=%0h sstat=%04h mstat=%04h ar=%04h mr0=%04h mr1=%04h dm0850=%04h",
-                     retired, dbg_pc, u_dcs.u_adsp.op_r,
-                     u_dcs.u_adsp.sstat, u_dcs.u_adsp.mstat,
+            $display("[tl] r=%0d pc=%0h op=%0h astat=%04h ar=%04h sr0=%04h dm855=%04h dm1fca=%04h i0=%04h i1=%04h",
+                     retired, dbg_pc, u_dcs.u_adsp.op_r, u_dcs.u_adsp.astat,
                      u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 10],
-                     u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 11],
-                     u_dcs.u_adsp.gr[12],
-                     u_dcs.u_adsp.dm[16'h0850]);
+                     u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 14],
+                     u_dcs.u_adsp.dm[16'h0855], u_dcs.u_adsp.dm[16'h1fca],
+                     u_dcs.u_adsp.iR[0], u_dcs.u_adsp.iR[1]);
             tl_n <= tl_n + 1;
         end
     end
+
+    // Poll-loop watch: every retirement of the instructions at pc 0x42-0x48
+    // with the registers and words the loop tests. This is the only way to see
+    // why the branch keeps going back.
+    integer loop_n = 0;
+    always @(posedge clk) begin
+        if (!rst && dbg_valid && (loop_n < 80) &&
+            (dbg_pc >= 14'h42) && (dbg_pc <= 14'h48)) begin
+            $display("[loop] r=%0d pc=%0h op=%0h ar=%04h sr0=%04h astat=%04h dm1fca=%04h dm855=%04h",
+                     retired, dbg_pc, u_dcs.u_adsp.op_r,
+                     u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 10],
+                     u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 14],
+                     u_dcs.u_adsp.astat, u_dcs.u_adsp.dm[16'h1fca],
+                     u_dcs.u_adsp.dm[16'h0855]);
+            loop_n <= loop_n + 1;
+        end
+    end
+
+    // DM writes the firmware makes outside the DAG stores: every store into
+    // the modelled DM the program performs, with its pc and target word.
+    // (Watching the array is the only way; dm_write is a task.)
+    reg [15:0] dm_spy_pc [0:7];
+    integer dm_spy_n = 0;
 
     // Mailbox: what the DSP's input latch holds and whether the board has seen
     // a write. Printed once, at the end.

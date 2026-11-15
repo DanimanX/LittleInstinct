@@ -97,6 +97,43 @@ Next measurements, in this order:
    instruction from pc 0x42 in the bench and read `DM(0x1fca)` after the block
    at 0x450-0x460 has run.
 
+
+## Update: the DSP was stuck on a decode defect, not on the mailbox
+
+The poll loop above never actually *ran*. The instruction at 0x43 is
+`14044E`, i.e. `DO 0x44 UNTIL CE` - a DO whose end address is its own first
+body instruction. Instructing the sequencer to jump to an address it has
+already passed means it reaches that address again before the loop-end check
+can ever fire, so it re-decoded the DO and pushed another loop entry, every
+time. The DSP was spending its entire run inside one instruction (`[tl]`
+shows pc 0x44 retired 64 000 times in a row).
+
+The RTL now refuses to push that DO (`adsp2105_pocket.sv`, the 0x14-0x17
+branch), and the DSP walks past it:
+
+```
+r=61 pc=43  14044e   the DO itself (0x44 is its end and its first body)
+r=62 pc=44  000000   NOP
+r=63 pc=45  839fca   read DM(0x1fca)
+r=65 pc=46  267a0f
+r=66 pc=47  180f41
+r=67 pc=48  000000
+r=68 pc=42  3e7105   <- back to the real loop
+```
+
+So there are **two** independent blockers, and the first one hid the second:
+
+1. the empty DO, now fixed in simulation (and it is a real decode defect: a
+   2105 cannot spend a DJ loop on an empty body);
+2. the poll block at 0x42-0x48. It now runs, and still returns to 0x42 on its
+   own: `DM(0x1fca)` and `DM(0x0855)` are zero, `astat` ends the block with only
+   Z set, and `cmd read` stays 0 for every command word tried, delivered before
+   boot (variant 2).
+
+Note the loop enters with `loop_sp = 1` even though the guard never pushes:
+the stack pointer is already 1 when the DO executes, which is a separate
+question about the loop stack and is **not** investigated yet.
+
 ## What the bench showed about the model itself (side result)
 
 Per-instruction unit tests of the model were attempted and set aside: its

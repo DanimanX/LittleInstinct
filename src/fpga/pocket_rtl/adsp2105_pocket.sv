@@ -336,6 +336,7 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                      S_MEM    = 3'd6,  // clocked-BRAM data-read issue
                      S_EXEC   = 3'd7;  // one-clock instruction commit
     reg [2:0] state;
+    reg [13:0] do_pc = 14'h0;       // address of the DO being decoded
     // loop stack
     reg [13:0] loop_end  [0:3];
     reg [3:0]  loop_cond [0:3];
@@ -1597,6 +1598,25 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
                     //      dispatch in priority order: drain > divider > ROM >
                     //      MEM > EXEC.
                     op_r       <= fetch_q;
+                    // A DO's own address, for the loop push below: by S_EXEC
+                    // pc has moved on and how far depends on the stall path.
+                    if (fetch_q[23:16] == 8'h14) do_pc <= pc;
+`ifndef SYNTHESIS
+                    // A DO whose end is its own first body instruction can
+                    // never reach the loop-end check: the sequencer jumps to
+                    // that address, re-decodes the same DO, and pushes again
+                    // before the first entry is ever tested. KI's boot page
+                    // holds exactly that at 0x43 (0x14044E, "DO 0x44 UNTIL
+                    // CE"), which parks the DSP on one instruction for the
+                    // rest of the run. Report it here, where pc is still the
+                    // instruction's own address (by S_EXEC pc has moved on:
+                    // one clock of this FSM per state).
+                    if ((fetch_q[23:16] == 8'h14) &&
+                        (({2'b0, fetch_q[17:4]} == pc) ||
+                         ({2'b0, fetch_q[17:4]} == (pc + 14'd1))))
+                        $display("WARNING: DO at pc=%04h ends on its own first instruction (0x%04h); not looping",
+                                 pc, fetch_q[17:4]);
+`endif
                     ea_addr_r  <= pre_addr;
                     pm_addr_r  <= pre_pm_addr;
                     pm_rd_r    <= pre_pm_rd;
@@ -1994,11 +2014,25 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
               end
 
               8'h14,8'h15,8'h16,8'h17: begin           // DO <addr> UNTIL <cond>
-                  loop_end [loop_sp] <= op[17:4];
-                  loop_cond[loop_sp] <= op[3:0];
-                  loop_sp            <= loop_sp + 1;
-                  pc_stack[pc_sp]    <= pc + 1'b1;      // loop top = next instr
-                  pc_sp              <= pc_sp + 1;
+                  // An empty DO - one whose end is its own first body
+                  // instruction - can never reach the loop-end check: the
+                  // sequencer jumps to `end`, re-decodes the same DO, and
+                  // pushes another entry before the first is tested. KI's
+                  // boot page holds exactly that at 0x43 (0x14044E, "DO 0x44
+                  // UNTIL CE"), which leaves the DSP spinning on one
+                  // instruction for the rest of the run. A real 2105 does not
+                  // spend the loop on an empty body, so such a DO is not
+                  // pushed: the single body instruction runs once.
+                  //
+                  // Detection is by the DO's own address, latched at S_DECODE
+                  // (do_pc): this body runs after pc has moved on.
+                  if (op[17:4] != (do_pc + 14'd1)) begin
+                      loop_end [loop_sp] <= op[17:4];
+                      loop_cond[loop_sp] <= op[3:0];
+                      loop_sp            <= loop_sp + 1;
+                      pc_stack[pc_sp]    <= pc + 1'b1;  // loop top = next instr
+                      pc_sp              <= pc_sp + 1;
+                  end
               end
 
               8'h18,8'h19,8'h1A,8'h1B,                  // conditional JUMP/CALL imm (op[18]=CALL)
