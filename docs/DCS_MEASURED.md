@@ -176,7 +176,77 @@ encoding, not the model's PM size.
 The same revision claimed the 0x46 ALU op "is not in the subset". The model does
 not strand on it (`o_unimpl` stays clear), so that claim is unsupported too.
 
-## What the bench showed about the model itself (side result)## What the bench showed about the model itself (side result)
+
+## New: the jump word and the CPU bench
+
+Reading the two unresolved items against each other turned up what may be the
+same defect twice:
+
+**The jump word itself.** `0x180F41` at pc 0x47 has `op[18] = 0`, which the model
+reads as "conditional JUMP", and a 4-bit field `0x1` as its condition. `0x1` is
+`!Z`. It also carries a 12-bit field `0x0F4`. A jump that takes a 4-bit condition
+*and* a second, contradicting operand in the same word is not a shape the model
+handles: it evaluates `!Z` and ignores `0x0F4`. Whether the real encoding is
+page-relative, `0x0F4`-as-target, or a different instruction class is **still
+not established** — but note what it looks like next to the item below.
+
+**The CPU bench's failure has the same shape.** With the boot image fixed by the
+program above, the first 10 retired instructions of `tb_cpu_mem` decode
+correctly (`lui $sp`, `ori $sp`, `lui $t0`, `ori $t0`, `lui $t1`, `ori $t1`,
+`sw`, `lw`, `bne`, nop) and then the CPU is at `0xB4012454`, having written
+0x09004915 through the `bne`'s delay slot area. `0xB401...` is a jump target:
+the CPU took a branch to an address computed from an instruction word. `errors`
+stays 0 and COP0's `cause_live` shows ExcCode 2 (TLB miss); the run then times
+out at PC `B40128FC`, retired 0x136, on an address that walks forward 4 bytes a
+time — not an infinite loop, an endless instruction stream through unmapped
+memory.
+
+Two candidates, both testable without hardware:
+
+1. the 0xBFC00000 boot region is not backed for *instruction* fetches the way
+   the bench's responder assumes, so the fetch after the branch reads zeros;
+2. a branch displacement is applied relative to an instruction word rather than
+   to the address (the same category of defect as the jump word above).
+
+The bench's timeout line now prints `errors`, `cause_live` and `exc` so the next
+run does not need this instrumentation again.
+
+## What the bench showed about the model itself (side result)
+## New: the jump word and the CPU bench
+
+Reading the two unresolved items against each other turned up what may be the
+same defect twice:
+
+**The jump word itself.** `0x180F41` at pc 0x47 has `op[18] = 0`, which the model
+reads as "conditional JUMP", and a 4-bit field `0x1` as its condition. `0x1` is
+`!Z`. It also carries a 12-bit field `0x0F4`. A jump that takes a 4-bit condition
+*and* a second, contradicting operand in the same word is not a shape the model
+handles: it evaluates `!Z` and ignores `0x0F4`. Whether the real encoding is
+page-relative, `0x0F4`-as-target, or a different instruction class is **still
+not established** — but note what it looks like next to the item below.
+
+**The CPU bench's failure has the same shape.** With the boot image fixed by the
+program above, the first 10 retired instructions of `tb_cpu_mem` decode
+correctly (`lui $sp`, `ori $sp`, `lui $t0`, `ori $t0`, `lui $t1`, `ori $t1`,
+`sw`, `lw`, `bne`, nop) and then the CPU is at `0xB4012454`, having written
+0x09004915 through the `bne`'s delay slot area. `0xB401...` is a jump target:
+the CPU took a branch to an address computed from an instruction word. `errors`
+stays 0 and COP0's `cause_live` shows ExcCode 2 (TLB miss); the run then times
+out at PC `B40128FC`, retired 0x136, on an address that walks forward 4 bytes a
+time — not an infinite loop, an endless instruction stream through unmapped
+memory.
+
+Two candidates, both testable without hardware:
+
+1. the 0xBFC00000 boot region is not backed for *instruction* fetches the way
+   the bench's responder assumes, so the fetch after the branch reads zeros;
+2. a branch displacement is applied relative to an instruction word rather than
+   to the address (the same category of defect as the jump word above).
+
+The bench's timeout line now prints `errors`, `cause_live` and `exc` so the next
+run does not need this instrumentation again.
+
+## What the bench showed about the model itself (side result)
 
 Per-instruction unit tests of the model were attempted and set aside: its
 sequencer and behavioral PM do not agree on instruction boundaries when a

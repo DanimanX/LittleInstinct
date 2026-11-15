@@ -351,8 +351,14 @@ begin
             wait;
          end if;
       end loop;
+      -- The error flags and the COP0 cause are printed here because the first
+      -- thing to check on a timeout is whether the CPU stopped on its own
+      -- (errors /= 0) or simply never reached the marker.
       report "FAIL_CPU_MEM: timeout, PC=" & to_hstring(debug_fetch_pc)
          & " retired=" & to_hstring(debug_retired)
+         & " errors=" & to_hstring(errors)
+         & " cause_live=" & to_hstring(debug_cop0_cause_live)
+         & " exc=" & to_hstring(debug_exc_cause)
          severity error;
       wait;
    end process;
