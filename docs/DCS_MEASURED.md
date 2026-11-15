@@ -198,6 +198,58 @@ Also measured: with the empty DO skipped, execution reaches the poll block at
 both ways, `astat` ends with only Z set). So whatever makes the DSP wait lives
 inside 0x45..0x48 and not in the crossing back.
 
+
+## Verified against the ADSP-2100 Family User's Manual
+
+Source: *ADSP-2100 Family User's Manual*, 3rd ed. (September 1995), Chapter 3
+("Program Sequencer") and Section 15 (Instruction Set Reference). The text used
+here came from the archive.org scan; the PDF at analog.com was not reachable
+from this machine.
+
+**Conditional JUMP/CALL, direct (Instruction Type 10):**
+
+```
+23 22 21 20 19 18 17 16 ... 4 | 3 ... 0
+ 0  0  0  1  1  C?  ADDR(14 bits)  COND(4)
+```
+
+> "For direct addressing ... the program address is stored directly in the
+> instruction word as a **full 14-bit field**."
+
+and, for the mechanism:
+
+> "The 14-bit jump address is embedded in the JUMP instruction word. When a
+> JUMP instruction is decoded, the jump address is input directly to the next
+> address mux of the program sequencer."
+
+So the target is an **absolute 14-bit page address**, not a displacement. The
+model's decode (`tgt = op[17:4]`, `pc <= tgt`) is correct.
+
+**DO UNTIL:** the manual describes the loop comparator as testing the *last
+instruction address embedded in the DO*, with "the address of the first
+instruction in the loop ... maintained on the top of the PC stack". It says
+nothing about a DO whose end equals its own first body instruction - that
+encoding has no instruction to test at all, which is why the model got stuck.
+
+**Decoding the three words that matter:**
+
+```
+043  14044E   DO 0x044 UNTIL NOT CE     (body = 0x044, one instruction)
+047  180F41   JUMP 0x0F4 IF NE          (absolute)
+153  18153F   JUMP 0x153 IF TRUE        (absolute; 0x0F4 in-field is the target)
+```
+
+That last one is the interesting one: `0x18153F` looks **self-referential**
+under absolute addressing (`0x153 + 0x3F` = read as a field gives 0x153). It
+sits at the address the run reaches after the poll block in one of the
+experiments, which matches an intentional wait/return idiom better than a bug.
+
+**What this closes and what it does not.** The jump encoding question is closed:
+absolute, as the model already had it. The earlier "jumps to 0x0F88" note was
+wrong on two counts (wrong base, wrong arithmetic) and stays retracted. What is
+*not* established is why the DSP does not leave the poll block; that is a
+question about `0x1FCA` and the loop's conditions, not about decoding.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
@@ -253,6 +305,58 @@ Also measured: with the empty DO skipped, execution reaches the poll block at
 0x42, and the block returns to 0x42 **on its own** (the `JUMP` at 0x47 is taken
 both ways, `astat` ends with only Z set). So whatever makes the DSP wait lives
 inside 0x45..0x48 and not in the crossing back.
+
+
+## Verified against the ADSP-2100 Family User's Manual
+
+Source: *ADSP-2100 Family User's Manual*, 3rd ed. (September 1995), Chapter 3
+("Program Sequencer") and Section 15 (Instruction Set Reference). The text used
+here came from the archive.org scan; the PDF at analog.com was not reachable
+from this machine.
+
+**Conditional JUMP/CALL, direct (Instruction Type 10):**
+
+```
+23 22 21 20 19 18 17 16 ... 4 | 3 ... 0
+ 0  0  0  1  1  C?  ADDR(14 bits)  COND(4)
+```
+
+> "For direct addressing ... the program address is stored directly in the
+> instruction word as a **full 14-bit field**."
+
+and, for the mechanism:
+
+> "The 14-bit jump address is embedded in the JUMP instruction word. When a
+> JUMP instruction is decoded, the jump address is input directly to the next
+> address mux of the program sequencer."
+
+So the target is an **absolute 14-bit page address**, not a displacement. The
+model's decode (`tgt = op[17:4]`, `pc <= tgt`) is correct.
+
+**DO UNTIL:** the manual describes the loop comparator as testing the *last
+instruction address embedded in the DO*, with "the address of the first
+instruction in the loop ... maintained on the top of the PC stack". It says
+nothing about a DO whose end equals its own first body instruction - that
+encoding has no instruction to test at all, which is why the model got stuck.
+
+**Decoding the three words that matter:**
+
+```
+043  14044E   DO 0x044 UNTIL NOT CE     (body = 0x044, one instruction)
+047  180F41   JUMP 0x0F4 IF NE          (absolute)
+153  18153F   JUMP 0x153 IF TRUE        (absolute; 0x0F4 in-field is the target)
+```
+
+That last one is the interesting one: `0x18153F` looks **self-referential**
+under absolute addressing (`0x153 + 0x3F` = read as a field gives 0x153). It
+sits at the address the run reaches after the poll block in one of the
+experiments, which matches an intentional wait/return idiom better than a bug.
+
+**What this closes and what it does not.** The jump encoding question is closed:
+absolute, as the model already had it. The earlier "jumps to 0x0F88" note was
+wrong on two counts (wrong base, wrong arithmetic) and stays retracted. What is
+*not* established is why the DSP does not leave the poll block; that is a
+question about `0x1FCA` and the loop's conditions, not about decoding.
 
 ## New: the jump word and the CPU bench
 
