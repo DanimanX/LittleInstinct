@@ -281,6 +281,26 @@ model does not implement. This is the open question now; the earlier retraction
 of "jumps past the page" stands, and nothing in the RTL was changed on the
 strength of either reading.
 
+
+### Fixed against the manual: the condition-code table
+
+The manual's Table 15.9 (and 15.8) gives the condition encoding as:
+
+```
+0 EQ   1 NE   2 LT   3 GE   4 LE   5 GT
+6 AC   7 NOT AC   8 AV   9 NOT AV
+A MV   B NOT MV   C NEG  D POS   E NOT CE   F (none)  /* F = unconditional */
+```
+
+The model's `cond_true` had a different table from 0x2 upwards - `0x2` was GT
+instead of LT, `0x4`/`0x5` were swapped, MV and NEG were misplaced. It has been
+replaced with the manual's. Measured effect on the boot: none in the 4 ms run -
+the poll loop's `JUMP` takes condition `0x1` (NE), where both tables agree - but
+every other conditional branch in the firmware was being evaluated with the
+wrong flag pair, and several conditions were in the wrong place entirely.
+
+`run.sh`: 24 PASS, 0 FAIL after the change.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
@@ -419,6 +439,26 @@ fit it.** The reading that fits is the overlay/derived-ending form, which the
 model does not implement. This is the open question now; the earlier retraction
 of "jumps past the page" stands, and nothing in the RTL was changed on the
 strength of either reading.
+
+
+### Fixed against the manual: the condition-code table
+
+The manual's Table 15.9 (and 15.8) gives the condition encoding as:
+
+```
+0 EQ   1 NE   2 LT   3 GE   4 LE   5 GT
+6 AC   7 NOT AC   8 AV   9 NOT AV
+A MV   B NOT MV   C NEG  D POS   E NOT CE   F (none)  /* F = unconditional */
+```
+
+The model's `cond_true` had a different table from 0x2 upwards - `0x2` was GT
+instead of LT, `0x4`/`0x5` were swapped, MV and NEG were misplaced. It has been
+replaced with the manual's. Measured effect on the boot: none in the 4 ms run -
+the poll loop's `JUMP` takes condition `0x1` (NE), where both tables agree - but
+every other conditional branch in the firmware was being evaluated with the
+wrong flag pair, and several conditions were in the wrong place entirely.
+
+`run.sh`: 24 PASS, 0 FAIL after the change.
 
 ## New: the jump word and the CPU bench
 

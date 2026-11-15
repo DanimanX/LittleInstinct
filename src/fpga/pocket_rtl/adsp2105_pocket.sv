@@ -632,27 +632,35 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     // ---- ASTAT flag bits: SS=0x80 MV=0x40 Q=0x20 AS=0x10
     //      AC=0x08 AV=0x04 AN=0x02 AZ=0x01 ------------------------------------
     function automatic integer cond_true(input [3:0] c);
-        reg az, an, av, ac, as, mv;
+        // Condition encoding from the ADSP-2100 Family User's Manual, Table
+        // 15.9 (and Table 15.8, which orders them alphabetically by the same
+        // code). The previous table here was a "flags in the order they are
+        // computed" guess and was wrong from 0x2 upwards: 0x2 is LT
+        // (AN xor AV), not GT, and 0xE is NOT CE, not CE. The effect on the
+        // firmware is measurable - the poll block's JUMP takes 0x1, which both
+        // tables agree on, but its other branches do not.
+        reg az, an, av, ac, mv;
         begin
             az = astat[0]; an = astat[1]; av = astat[2];
-            ac = astat[3]; as = astat[4]; mv = astat[6];
+            ac = astat[3]; mv = astat[6];
             case (c)
                 4'h0: cond_true = az;              // EQ
                 4'h1: cond_true = !az;             // NE
-                4'h2: cond_true = !((an^av)|az);   // GT
-                4'h3: cond_true = (an^av)|az;      // LE
-                4'h4: cond_true = an^av;           // LT
-                4'h5: cond_true = !(an^av);        // GE
-                4'h6: cond_true = av;              // AV
-                4'h7: cond_true = !av;             // NOT AV
-                4'h8: cond_true = ac;              // AC
-                4'h9: cond_true = !ac;             // NOT AC
-                4'hA: cond_true = as;              // NEG
-                4'hB: cond_true = !as;             // POS
-                4'hC: cond_true = mv;              // MV
-                4'hD: cond_true = !mv;             // NOT MV
-                4'hE: cond_true = 1'bx;            // CE - handled inline (mutates cntr)
-                4'hF: cond_true = 1'b1;            // TRUE (always)
+                4'h2: cond_true = an ^ av;         // LT
+                4'h3: cond_true = !(an ^ av);      // GE
+                4'h4: cond_true = (an ^ av) | az;  // LE
+                4'h5: cond_true = !((an ^ av) | az); // GT
+                4'h6: cond_true = ac;              // AC
+                4'h7: cond_true = !ac;             // NOT AC
+                4'h8: cond_true = av;              // AV
+                4'h9: cond_true = !av;             // NOT AV
+                4'hA: cond_true = mv;              // MV
+                4'hB: cond_true = !mv;             // NOT MV
+                4'hC: cond_true = an;              // NEG  (X input sign - AN is
+                                                   // the ALU's sign flag for it)
+                4'hD: cond_true = !an;             // POS
+                4'hE: cond_true = !(cntr == 14'h0); // NOT CE (counter not expired)
+                4'hF: cond_true = 1'b1;            // unconditional
             endcase
         end
     endfunction
