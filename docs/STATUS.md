@@ -200,6 +200,34 @@ cd build/mac_stub/comb && quartus_sh --flow compile p && quartus_sta -t sta.tcl
 cd build/mac_stub/pipe && quartus_sh --flow compile p && quartus_sta -t sta.tcl
 ```
 
+---
+
+## 8. Full-design staged MAC fit & v1.0.26 console capture (2026-11-15)
+
+**Established in Quartus (`quartus_sh --flow compile pocket_ki`, commit `f67df6b`):**
+
+The staged MAC pipeline (`mac_stage[1:0]` + `mac_hold` + exact round-half-to-even in `src/fpga/pocket_rtl/adsp2105_pocket.sv`) was fitted in the full `5CEBA4F23C8` design:
+
+| Metric | Before (`v1.0.26`) | After (`f67df6b`) |
+|---|---|---|
+| Logic utilization (ALMs) | 18 253 / 18 480 (99 %) | **18 051 / 18 480 (98 %)** (−202 ALMs) |
+| Registers | 17 125 | **17 103** |
+| DSP blocks | 23 / 66 (35 %) | **21 / 66 (32 %)** |
+| `clk_core` (`general[0]`) setup | −3.017 ns / −2.04 ns | **+0.290 ns** (TNS `0.000`) |
+| All clocks setup (Slow 85C) | open on `general[0]` | **closed** (`TNS 0.000`, worst `+0.188 ns` on `general[5]`) |
+
+- Fast 1100mV 0C Hold on `general[5]` (`clk_sdram_cap`) remains open at `−0.180 ns` (`TNS −1.559 ns`).
+- **SDC note:** `pocket_ki.sdc:45` already places `ic|iki|u_pll|*divclk` in `set_clock_groups`; `pocket_ki.sta.rpt` shows 0 paths (`false path`) between `u_pll` and `general[0/1]`.
+- **Not yet simulated:** `vlog` and `vcom`/`vopt` compile cleanly (`0` errors), while `vsim` execution is blocked locally by missing `SALT_LICENSE_SERVER`.
+
+**Established on real Analogue Pocket console (`v1.0.26`):**
+
+- Initial hang phase: `V:0`, `AI:20C00000` (`last_command = 0x20` READ SECTOR, `irq=1`, `irq_pending=1`, `nIEN=0`), `RC:01020001`.
+- After a few seconds, software departure triggers: `V:1`, `DP:8802EC4C`, `DO:104F0004` (`beq $v0, $t7, +4`), `EX:00000012`.
+- Decoding `EX:00000012` against `cpu_cop0.vhd:1451-1471`: `ExcCode[6:2] = 4` (**`AdEL`**, unaligned load/fetch or `JR`/`JALR`), `bit[1] = 1` (**`SR.BEV = 1`**, boot ROM vectors), `bit[0] = 0` (**`SR.IE = 0`**).
+- `cpu_pocket.vhd:4393` (`PCnextBranch`) adds the branch offset to `PCold0` at stage 3, where `PCold0` already holds the delay-slot PC (`cpu.vhd:3372`), so the branch base is not off by 4. The `AdEL` therefore occurs in the delay slot (`0x8802EC50`) or immediate target after `READ SECTOR`.
+
+
 ### Full-design fit with pipelined MAC (2026-11-15)
 
 Implemented the staged MAC (`mac_stage`, `mac_hold`, `mac_issue()`, `mac_r3()` with round-half-to-even) in `src/fpga/pocket_rtl/adsp2105_pocket.sv` and compiled the full `pocket_ki` design in Quartus Prime 25.1 (`5CEBA4F23C8`):
