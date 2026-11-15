@@ -29,7 +29,7 @@ The project compiles, synthesizes, physically fits, and generates the complete `
   - **Timing:** Completely closed for Hold (+0.120 ns worst-case) and Recovery (+15.387 ns); inter-PLL asynchronous clock groups and `set_false_path -from [get_keepers {*rst_sync[*]}]` established in [`pocket_ki.sdc`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/pocket_ki.sdc).
   - **Generated Bitstream:** [`pocket_ki.rbf`](file:///PROCESOS/LittleInstinct/src/fpga/output_files/pocket_ki.rbf) (1.8 MB, MD5 `41d97ad4990f7bc034bceb74897ea77b`).
   - **APF Release Package:** Synchronized to SD card under [`Release/`](file:///PROCESOS/LittleInstinct/Release/) with bit-reversed [`bitstream.rbf_r`](file:///PROCESOS/LittleInstinct/Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r) (MD5 `d66c296ca6624954ce65ff0b8ef95f33`) and ready-to-extract ZIP archive [`LittleInstinct_Pocket_v1.0.0.zip`](file:///PROCESOS/LittleInstinct/Release/LittleInstinct_Pocket_v1.0.0.zip).
-  - **Hardware status:** Ready for hardware testing on Analogue Pocket to verify SDRAM boot sequence (`SD:1`, `BOOT:1`, `RST:0`) and capture software departure telemetry (`EX`, `DO`, `DP:8802EC4C`).
+  - **Hardware status:** Ready for hardware testing on Analogue Pocket to verify SDRAM boot sequence (`SD:1`, `BOOT:1`, `RST:0`) and capture software departure telemetry (`EX`, `DO`, `DP:8802EC4C`). The sound board still produces no audio, and the reason is open: see [`docs/STATUS.md`](docs/STATUS.md), which separates what has been measured from what has not.
 
 ## Layout
 
