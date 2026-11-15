@@ -188,6 +188,11 @@ entity cpu is
       -- "01" program -> boot ROM, "10" straight back to 0x88000000.
       debug_dep_trigger     : out std_logic_vector(1 downto 0) := (others => '0');
       debug_exc_cause       : out std_logic_vector(31 downto 0) := (others => '0');
+      -- BadVAddr latched by the SAME statement that latches debug_exc_cause,
+      -- so the two describe one event: EX names the ExcCode, this names the
+      -- address that raised it (for AdEL/AdES, the address the instruction
+      -- in DO tried to reach).
+      debug_badvaddr        : out std_logic_vector(31 downto 0) := (others => '0');
       debug_ret_count       : out std_logic_vector(31 downto 0) := (others => '0');
       -- The stage-4 data address at the moment the stall watchdog trips.
       -- debug_stall_pc says where the pipeline was; this says what it was
@@ -555,6 +560,7 @@ architecture arch of cpu is
    signal debug_dep_valid_register     : std_logic := '0';
    signal debug_prev_op_live           : std_logic_vector(31 downto 0) := (others => '0');
    signal debug_exc_cause_register     : std_logic_vector(7 downto 0) := (others => '0');
+   signal debug_badvaddr_register      : std_logic_vector(31 downto 0) := (others => '0');
    signal cop0_debug_cause             : unsigned(31 downto 0);
    signal cop0_debug_epc               : unsigned(31 downto 0);
    signal cop0_debug_badvaddr          : unsigned(31 downto 0);
@@ -1599,6 +1605,7 @@ begin
    debug_dep_trigger <= debug_dep_trigger_register;
    -- The opcode AT the departure pc, captured in the same statement as it.
    debug_exc_cause <= x"000000" & debug_exc_cause_register;
+   debug_badvaddr  <= debug_badvaddr_register;
 
    process (clk93)
    begin
@@ -1931,6 +1938,7 @@ begin
             debug_dep_trigger_register <= (others => '0');
             debug_dep_valid_register   <= '0';
             debug_exc_cause_register   <= (others => '0');
+            debug_badvaddr_register    <= (others => '0');
          elsif (ce_93 = '1' and stall = 0 and decodeNew = '1') then
             debug_fetch_pc_register <= std_logic_vector(PCold1(31 downto 0));
             debug_prev_op_live      <= std_logic_vector(opcode1);
@@ -1965,6 +1973,7 @@ begin
                debug_dep_trigger_register <= "01";
                debug_dep_valid_register   <= '1';
                debug_exc_cause_register   <= std_logic_vector(cop0_debug_cause(7 downto 0));
+               debug_badvaddr_register    <= std_logic_vector(cop0_debug_badvaddr);
             end if;
 
             -- The other restart shape: the game jumps straight back to its own

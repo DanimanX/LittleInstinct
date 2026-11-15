@@ -46,6 +46,9 @@ module ki_debug_screen #(
   input  wire   [7:0] ata_status,
   input  wire   [7:0] ata_error,
   input  wire  [31:0] disk_debug_info,
+  // 32-bit BVA field (Pocket port). Carries the CPU's latched COP0 BadVAddr
+  // while a departure capture is valid, so row 9 reads BVA instead of RF.
+  input  wire  [31:0] badvaddr,
 
   // ---------------------------------------------------------------------
   // Page 1: the frozen pre-event execution trace.
@@ -126,6 +129,7 @@ module ki_debug_screen #(
         ata_status,
         ata_error,
         disk_debug_info,
+        badvaddr,
         boot_state,
         sdram_ready
   });
@@ -164,6 +168,7 @@ module ki_debug_screen #(
         ata_status,
         ata_error,
         disk_debug_info,
+        badvaddr,
         boot_state,
         sdram_ready
       };
@@ -459,6 +464,7 @@ module ki_debug_screen #(
     logic  [7:0] d_ata_status;
     logic  [7:0] d_ata_error;
     logic [31:0] d_disk_debug;
+    logic [31:0] d_badvaddr;
     logic  [2:0] d_boot_state;
     logic        d_sdram_ready;
     begin
@@ -491,6 +497,7 @@ module ki_debug_screen #(
         d_ata_status,
         d_ata_error,
         d_disk_debug,
+        d_badvaddr,
         d_boot_state,
         d_sdram_ready
       } = data;
@@ -695,11 +702,23 @@ module ki_debug_screen #(
         // RF:00000001 means nothing reset the core except the operator and the
         // ROM load - and then the restart is NOT a reset after all.
         9: begin
-          if (column == 0) screen_char="R";
-          else if (column == 1) screen_char="F";
-          else if (column == 2) screen_char=":";
+          // BVA: COP0 BadVAddr latched by the SAME CPU statement that latches
+          // EX and DP/DO, so with V:1 (row 14) the four rows read as one
+          // event: DP/DO = the instruction, EX = its ExcCode, BVA = the
+          // address it faulted on. Bit 31 is the kseg validity of that
+          // address (1 = a real 0x8xxxxxxx-style kernel address), so
+          // BVA:00000000 under EX:...0C04 (AdEL) means the fault address was
+          // captured as zero, not that 0 is a valid code address.
+          //
+          // With V:0 there is no departure and this row is RF again: the
+          // first spontaneous reset, which BVA cannot describe.
+          if (column == 0) screen_char = d_pcm_level[8] ? "B" : "R";
+          else if (column == 1) screen_char = d_pcm_level[8] ? "V" : "F";
+          else if (column == 2) screen_char = d_pcm_level[8] ? "A" : ":";
           else if (column >= 3 && column <= 10)
-            screen_char=hex32_ascii(d_reset_first, column-3);
+            screen_char = hex32_ascii(d_pcm_level[8] ? d_badvaddr
+                                                     : d_reset_first,
+                                      column-3);
         end
         10: begin
           // DO: the opcode ONE DECODE BEFORE the last PC in the program, which

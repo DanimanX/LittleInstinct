@@ -135,6 +135,8 @@ entity ki_cpu_core is
       debug_dep_valid       : out std_logic := '0';
       debug_dep_trigger     : out std_logic_vector(1 downto 0) := (others => '0');
       debug_exc_cause       : out std_logic_vector(31 downto 0);
+      -- BadVAddr latched with debug_exc_cause; see cpu.vhd's port.
+      debug_badvaddr        : out std_logic_vector(31 downto 0);
       debug_cop0_cause_live : out std_logic_vector(31 downto 0);
       debug_ret_count       : out std_logic_vector(31 downto 0);
       debug_retire_pc       : out std_logic_vector(31 downto 0);
@@ -371,6 +373,7 @@ begin
          debug_dep_valid       => debug_dep_valid,
          debug_dep_trigger     => debug_dep_trigger,
          debug_exc_cause       => debug_exc_cause,
+         debug_badvaddr        => debug_badvaddr,
          debug_ret_count       => debug_ret_count,
          debug_retire_pc       => debug_retire_pc,
          debug_retire_opcode   => debug_retire_opcode,

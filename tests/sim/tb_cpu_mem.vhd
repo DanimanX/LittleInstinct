@@ -81,6 +81,7 @@ architecture sim of tb_cpu_mem is
    signal debug_dep_valid : std_logic;
    signal debug_dep_trigger : std_logic_vector(1 downto 0);
    signal debug_exc_cause : std_logic_vector(31 downto 0);
+   signal debug_badvaddr : std_logic_vector(31 downto 0);
    signal debug_cop0_cause_live : std_logic_vector(31 downto 0);
    signal debug_ret_count : std_logic_vector(31 downto 0);
    signal debug_retire_pc : std_logic_vector(31 downto 0);
@@ -219,6 +220,7 @@ begin
       debug_dep_valid => debug_dep_valid,
       debug_dep_trigger => debug_dep_trigger,
       debug_exc_cause => debug_exc_cause,
+      debug_badvaddr => debug_badvaddr,
       debug_cop0_cause_live => debug_cop0_cause_live,
       debug_ret_count => debug_ret_count,
       debug_retire_pc => debug_retire_pc,

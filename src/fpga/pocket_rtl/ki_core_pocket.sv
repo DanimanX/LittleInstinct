@@ -737,6 +737,8 @@ wire [31:0] debug_cpu_ret_count;
 // Captured only on the 01 path (program -> boot ROM). On the 10 path it holds
 // whatever the previous 01 departure left, which is why C: must be read too.
 wire [31:0] debug_cpu_exc_cause;
+// BadVAddr latched by the same CPU statement as debug_cpu_exc_cause.
+wire [31:0] debug_cpu_badvaddr;
 reg [31:0] debug_cpu_ret_count_meta = 32'h0, debug_cpu_ret_count_sync = 32'h0;
 // Departure capture from the CPU: the last PC executed in the decompressed
 // program (the delay slot of the branch that left, when it left by one), the
@@ -775,6 +777,7 @@ reg [31:0] debug_dep_pc_hold    = 32'd0;
 reg [31:0] debug_dep_op_hold    = 32'd0;
 reg  [1:0] debug_dep_trig_hold  = 2'd0;
 reg  [7:0] debug_dep_cause_hold = 8'd0;
+reg [31:0] debug_dep_badvaddr_hold = 32'd0;
 
 wire debug_dep_strobe = debug_dep_valid_sync & ~debug_dep_valid_d;
 
@@ -788,11 +791,13 @@ always @(posedge clk_core) begin
 		debug_dep_op_hold    <= 32'd0;
 		debug_dep_trig_hold  <= 2'd0;
 		debug_dep_cause_hold <= 8'd0;
+		debug_dep_badvaddr_hold <= 32'd0;
 	end else if (debug_dep_strobe) begin
 		debug_dep_pc_hold    <= debug_cpu_dep_pc;
 		debug_dep_op_hold    <= debug_cpu_prev_op;
 		debug_dep_trig_hold  <= debug_cpu_dep_trigger;
 		debug_dep_cause_hold <= debug_cpu_exc_cause[7:0];
+		debug_dep_badvaddr_hold <= debug_cpu_badvaddr;
 	end
 end
 (* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
@@ -1352,6 +1357,7 @@ ki_cpu_core #(
 	.debug_dep_valid(debug_cpu_dep_valid),
 	.debug_dep_trigger(debug_cpu_dep_trigger),
 	.debug_exc_cause(debug_cpu_exc_cause),
+	.debug_badvaddr(debug_cpu_badvaddr),
 	.debug_cop0_cause_live(debug_cop0_cause_live),
 	.debug_ret_count(debug_cpu_ret_count),
 	.debug_trace_bus(debug_cpu_trace_bus),
@@ -1902,6 +1908,11 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.ata_status(debug_ata_status),
 		.ata_error(debug_ata_error),
 		.disk_debug_info(debug_disk_info),
+		// BVA (screen row 9). With a departure captured (V:1) this is the
+		// COP0 BadVAddr of that fault, latched in the same CPU statement as
+		// EX/DP/DO, so the four rows describe one event. With V:0 the screen
+		// ignores it and row 9 stays RF.
+		.badvaddr(debug_dep_valid_sync ? debug_dep_badvaddr_hold : 32'd0),
 		// Page 1 is the frozen pre-event trace. It is fed from the clk_core
 		// shadow, not from the CPU domain directly, so what is on screen is a
 		// coherent capture rather than a live sample of a 736-bit bus.
