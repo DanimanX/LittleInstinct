@@ -168,9 +168,30 @@ for the MAC alone. Two caveats that matter more than the numbers:
 - The full design has **227 ALM and 2 LAB of margin**. 62 ALMs might fit; 55
   LABs cannot.
 
-That last line is the result: **restructuring the MAC is not a fix the current
-fit can absorb** unless something else gives up 55 LABs first. The levers for
-that are in `docs/REENGINEERING.md` §6, and the framebuffer is the large one.
+That last line was the first conclusion, and it was wrong. Measured again with
+the MAC inside the real `adsp2105` block, both variants fitted in the same tree
+with the same settings (`AGGRESSIVE AREA`, `BALANCED`, SEED 9, 20 ns clock):
+
+| ADSP block as built | ALMs | LABs | Registers | Worst setup |
+|---|---|---|---|---|
+| unchanged (combinational MAC) | 8 515 | 1 123 | 4 293 | **−2.067 ns** (`mstat[0]` → `gr[13][15]`) |
+| MAC in four registers | 8 494 | 1 112 | 4 626 | **+3.870 ns** (`mstat[0]` → `gr[26][8]`) |
+
+So the pipeline **closes the block and frees 11 LABs at the same time** (−21
+ALMs, −11 LABs, +333 registers). The standalone stub had the cost backwards
+because a 100-ALM stub with no real cone around it is placed differently; the
+real block is the only place this figure means anything.
+
+What that changes: restructuring the MAC is now the *favourable* option for both
+of the port's problems at once - it closes the setup cone and gives back LABs
+instead of taking them. What it does **not** yet show:
+
+- this is the block alone at 20 ns, not the design with its PLL and its real
+  clock path (the CI figure for that cone is −3.017 ns);
+- the staged patch truncates `RTS` (the result arrives one instruction later
+  than the commit reads it), so it is a structure measurement, not a fix;
+- the ALM/LAB figures are one seed. SEED 9 on the whole design is what the port
+  ships and has not been re-run with the staged MAC.
 
 Reproduce (both need Quartus on PATH):
 
