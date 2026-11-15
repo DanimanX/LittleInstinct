@@ -2014,18 +2014,20 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
               end
 
               8'h14,8'h15,8'h16,8'h17: begin           // DO <addr> UNTIL <cond>
-                  // An empty DO - one whose end is its own first body
-                  // instruction - can never reach the loop-end check: the
-                  // sequencer jumps to `end`, re-decodes the same DO, and
-                  // pushes another entry before the first is tested. KI's
-                  // boot page holds exactly that at 0x43 (0x14044E, "DO 0x44
-                  // UNTIL CE"), which leaves the DSP spinning on one
-                  // instruction for the rest of the run. A real 2105 does not
-                  // spend the loop on an empty body, so such a DO is not
-                  // pushed: the single body instruction runs once.
+                  // KI's boot page holds 0x14044E at 0x43: a DO whose end is
+                  // its own first body instruction. Pushing it makes the
+                  // sequencer jump to 0x44 and re-decode the DO before the
+                  // loop-end check can fire, parking the DSP on one
+                  // instruction for the rest of the run. Such a DO is not
+                  // pushed; its single body instruction runs once and
+                  // execution continues. Detection is by the DO's own address
+                  // latched at S_DECODE (do_pc): pc has already moved on here.
                   //
-                  // Detection is by the DO's own address, latched at S_DECODE
-                  // (do_pc): this body runs after pc has moved on.
+                  // The loop stack is deliberately NOT adjusted (see below):
+                  // it is also the return stack, and the rest of the boot
+                  // page's CALL/RTS sequence depends on its current depth - a
+                  // second RTS at 0x152 pops a saved state that the stack top
+                  // has to still be holding.
                   if (op[17:4] != (do_pc + 14'd1)) begin
                       loop_end [loop_sp] <= op[17:4];
                       loop_cond[loop_sp] <= op[3:0];

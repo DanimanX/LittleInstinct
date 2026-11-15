@@ -177,6 +177,27 @@ The same revision claimed the 0x46 ALU op "is not in the subset". The model does
 not strand on it (`o_unimpl` stays clear), so that claim is unsupported too.
 
 
+
+### Experiment: the empty DO cannot simply be skipped
+
+Three bindings were measured, not argued:
+
+| DO handling | Result |
+|---|---|
+| pushed normally | pc sticks at 0x44, 64 000 retirements of one word |
+| not pushed (in place) | walks 0x43 -> 0x48, the poll block runs, then returns to 0x42 |
+| dropped entirely (no push, no stack) | reaches pc 0x153 and stops: the second RTS at a call site pops a stack entry that the earlier CALL needs |
+
+The third is the informative one. The boot page doubles its loop stack and its
+return stack on one array (`loop_sp`/`pc_sp` into `pc_stack`), so "do not enter
+the loop and do not touch the stack" is right and "do not enter the loop and pop
+one entry" is wrong. The version kept is the second row.
+
+Also measured: with the empty DO skipped, execution reaches the poll block at
+0x42, and the block returns to 0x42 **on its own** (the `JUMP` at 0x47 is taken
+both ways, `astat` ends with only Z set). So whatever makes the DSP wait lives
+inside 0x45..0x48 and not in the crossing back.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
@@ -212,6 +233,27 @@ The bench's timeout line now prints `errors`, `cause_live` and `exc` so the next
 run does not need this instrumentation again.
 
 ## What the bench showed about the model itself (side result)
+
+### Experiment: the empty DO cannot simply be skipped
+
+Three bindings were measured, not argued:
+
+| DO handling | Result |
+|---|---|
+| pushed normally | pc sticks at 0x44, 64 000 retirements of one word |
+| not pushed (in place) | walks 0x43 -> 0x48, the poll block runs, then returns to 0x42 |
+| dropped entirely (no push, no stack) | reaches pc 0x153 and stops: the second RTS at a call site pops a stack entry that the earlier CALL needs |
+
+The third is the informative one. The boot page doubles its loop stack and its
+return stack on one array (`loop_sp`/`pc_sp` into `pc_stack`), so "do not enter
+the loop and do not touch the stack" is right and "do not enter the loop and pop
+one entry" is wrong. The version kept is the second row.
+
+Also measured: with the empty DO skipped, execution reaches the poll block at
+0x42, and the block returns to 0x42 **on its own** (the `JUMP` at 0x47 is taken
+both ways, `astat` ends with only Z set). So whatever makes the DSP wait lives
+inside 0x45..0x48 and not in the crossing back.
+
 ## New: the jump word and the CPU bench
 
 Reading the two unresolved items against each other turned up what may be the
