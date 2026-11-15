@@ -216,12 +216,13 @@ module tb_adsp;
     always @(posedge clk) begin
         if (!rst && dbg_valid && (loop_n < 80) &&
             (dbg_pc >= 14'h42) && (dbg_pc <= 14'h48)) begin
-            $display("[loop] r=%0d pc=%0h op=%0h ar=%04h sr0=%04h astat=%04h dm1fca=%04h dm855=%04h",
+            $display("[loop] r=%0d pc=%0h op=%0h ar=%04h af=%04h sr0=%04h astat=%04h dm1fca=%04h i0=%04h m0=%04h",
                      retired, dbg_pc, u_dcs.u_adsp.op_r,
                      u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 10],
+                     u_dcs.u_adsp.afb[u_dcs.u_adsp.bnk],
                      u_dcs.u_adsp.gr[{u_dcs.u_adsp.bnk, 4'b0000} + 14],
                      u_dcs.u_adsp.astat, u_dcs.u_adsp.dm[16'h1fca],
-                     u_dcs.u_adsp.dm[16'h0855]);
+                     u_dcs.u_adsp.iR[0], u_dcs.u_adsp.mR[0]);
             loop_n <= loop_n + 1;
         end
     end

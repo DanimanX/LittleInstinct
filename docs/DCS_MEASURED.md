@@ -134,6 +134,44 @@ Note the loop enters with `loop_sp = 1` even though the guard never pushes:
 the stack pointer is already 1 when the DO executes, which is a separate
 question about the loop stack and is **not** investigated yet.
 
+
+### Reading the poll block from the ROM image (static)
+
+The words at 0x42-0x47 decode to something that cannot loop, which is why the
+RTL's behaviour there has to be read instruction by instruction:
+
+```
+042  3e7105   AR  = 0x2710 | CNTR  (0x3E = 14-bit immediate into grp3 idx 5)
+043  14044E   DO 0x44 UNTIL CE
+044  000000   NOP
+045  839FCA   AY0 = DM(0x1FCA) | 0x0800 | 0x0200 | 0x0100  (0x83 = read, immediate 0x1FCA)
+046  267A0F   conditional ALU into AF, condition 0x0F
+047  180F41   JUMP 0x0F88 if !Z
+```
+
+Two facts from that, both measured in the bench:
+
+- The loop cannot close through 0x42: the `JUMP` at 0x47 comes after the last
+  instruction of a one-body DO, so it leaves the loop. Between 0x45 and 0x47
+  there is no ADD or MAC, so Z can only be set by the 0x46 ALU op itself.
+- That op is either "AND with an implied 0" (Z set) or "the AF constant
+  unchanged" (Z follows AF). It is **not in the ADSP-2105 subset the model
+  implements**, as far as the encoding can tell; it reads 0 from the model and
+  a mask from the ROM. This needs the ADSP-2105 opcode table, not more
+  simulation.
+
+### How far the model can take this alone
+
+The boot page is 376 words and the firmware's own code jumps past it (the
+`JUMP` at 0x47 targets 0x0F88). Everything from there on is read through the
+ROM window, and the model uses a **14-bit** PM (16 384 words = 64 KiB), so
+addresses beyond that wrap inside the model and the run cannot be followed.
+Widening PM needs 24-bit addresses from here through the whole core.
+
+The two symptoms already collected (`DM(0x1FCA)` reads 0 where the image holds
+0xFF, and the 0x46 ALU op is not in the subset) are enough to say: the DCS
+board's silence is a **model/decoder gap**, not (yet) a hardware one.
+
 ## What the bench showed about the model itself (side result)
 
 Per-instruction unit tests of the model were attempted and set aside: its
