@@ -539,14 +539,13 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
          (pre_dm_wr && pre_region == RG_ALIAS) || pre_pm_rd)   ? 2'd1 : 2'd0;
 
     // ---- MAC opcode pre-class (from the current fetch_q, no register) --------
-    // Every opcode class whose EXEC body reaches mac_wb(), i.e. hi in 0x20-0x7F
-    // with op[17]=0 (MAC half, not the ALU half); sub=op[16:13]==0 is MAC-NOP
-    // and commits nothing. That is 0x20-23 (cond MAC->MR), 0x24-27 (cond
-    // MAC->MF), 0x28-2F (MAC + register move), 0x50-5F (MAC + PM(I,M)) and
-    // 0x60-7F (MAC + DM(I,M)). Stage 1 of the 4-stage MAC pipeline (see "MAC
-    // pipeline" below) issues from S_DECODE of the CURRENT instruction, so the
-    // classification is combinational over fetch_q; nothing else can set it.
-    wire mac_op_now = (fetch_q[23:16] >= 8'h20) && (fetch_q[23:16] < 8'h80) &&
+    // Every opcode class whose EXEC body reaches mac_wb(), i.e. 0x20-0x2F,
+    // 0x58-0x5F and 0x78-0x7F with op[17]=0 (MAC half, not the ALU half);
+    // sub=op[16:13]==0 is MAC-NOP and commits nothing. Stage 1 of the 4-stage
+    // MAC pipeline issues from S_DECODE of the CURRENT instruction.
+    wire mac_op_now = ((fetch_q[23:20] == 4'h2) ||
+                       (fetch_q[23:19] == 5'b0101_1) ||
+                       (fetch_q[23:19] == 5'b0111_1)) &&
                       !fetch_q[17] && (fetch_q[16:13] != 4'h0);
 
     // ---- S_DECODE latches ---------------------------------------------------
@@ -1127,7 +1126,7 @@ reg        pm_we; reg [2:0] pm_be; reg [13:0] pm_wa; reg [23:0] pm_wd;
     // prod_w is the sign-extended 32-bit product, shifted left one outside
     // INTEGER mode, byte for byte as in mac_r48_f.
     task automatic mac_r3();
-        reg [47:0] prod_w, acc_w;
+        reg signed [47:0] prod_w, acc_w;
         begin
             prod_w = mac_sh_e ? {{16{mac_p_e[30]}}, mac_p_e[30:0], 1'b0}
                               : {{16{mac_p_e[31]}}, mac_p_e};
