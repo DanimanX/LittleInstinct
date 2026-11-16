@@ -5797,14 +5797,14 @@ begin
                   writeback_fifoStall          <= '0';
                   
                   -- check if last command must be forwarded
-                  if (resultWriteEnable = '1') then
+                  if (resultWriteEnable = '1' or executeCOP0ReadEnable = '1' or executeCOP2ReadEnable = '1') then
                      if (decSource1 > 0 and resultTarget = decSource1) then writebackForwardValue1 <= '1'; end if;
                      if (decSource2 > 0 and resultTarget = decSource2) then writebackForwardValue2 <= '1'; end if;
                   end if;
                   
                   -- A load that took its bubble: the instruction behind it
                   -- waited in stage 3 and reads it now.
-                  if (executeMemReadEnable = '1' and executeCOP1ReadEnable = '0' and
+                  if ((executeMemReadEnable = '1' or executeCOP0ReadEnable = '1' or executeCOP2ReadEnable = '1') and executeCOP1ReadEnable = '0' and
                       (not LOAD_INTERLOCK or executeStallFromMEM = '1')) then
                      if (decodeSource1 > 0 and resultTarget = decodeSource1) then writebackForwardValue1 <= '1'; end if;
                      if (decodeSource2 > 0 and resultTarget = decodeSource2) then writebackForwardValue2 <= '1'; end if;
@@ -5812,7 +5812,7 @@ begin
                   -- One that did not: the instruction behind it did not read
                   -- it and goes on to stage 4 with it; the one after comes up
                   -- from stage 2 now, as behind any other result.
-                  if (LOAD_INTERLOCK and executeMemReadEnable = '1' and
+                  if (LOAD_INTERLOCK and (executeMemReadEnable = '1' or executeCOP0ReadEnable = '1' or executeCOP2ReadEnable = '1') and
                       executeCOP1ReadEnable = '0' and executeStallFromMEM = '0') then
                      if (decSource1 > 0 and resultTarget = decSource1) then writebackForwardValue1 <= '1'; end if;
                      if (decSource2 > 0 and resultTarget = decSource2) then writebackForwardValue2 <= '1'; end if;

@@ -347,7 +347,7 @@ begin
          -- KI writes code and its visible framebuffers through KSEG0 during
          -- bootstrap. Keep those stores coherent with instruction fetch and
          -- scanout until the complete R4600 cache-op path is proven.
-         DATACACHEWRITETHROUGH => '1',
+         DATACACHEWRITETHROUGH => '0',
          DATACACHETLBON        => '1',
          RANDOMMISS            => (others => '0'),
          DISABLE_BOOTCOUNT     => '0',
