@@ -5,22 +5,18 @@
 // KillerInstinct.sv with one change: the MiSTer HPS shell (hps_io) is replaced
 // by pk_io, driven from the APF bridge.
 //
-// What this file provides, and what it does not:
-//
-//   clocks   50 MHz core (from ki_pll), 6.25 MHz APF pixel clock. The core's own
-//            PLL runs from that 50 MHz reference and produces CLK_VIDEO = clk_core
-//            = 50 MHz, so CE_PIXEL = 50/8 = 6.25 MHz: exactly the APF pixel rate,
-//            and the video capture needs no rate adapter.
-//   ROM      data slot 1 -> pk_io -> ioctl stream -> boot ROM + DCS image.
-//   memory   the core's SDR SDRAM pins go to the Pocket's 64 MB dram_* bus:
-//            same protocol, and ki_sdram_burst already speaks it.
+//   clocks   one PLL (ki_pll.sv): 50 MHz system clock, three 100 MHz SDRAM
+//            phases, and the 6.25 MHz APF pixel clock with its 90-degree twin.
+//            CE_PIXEL is clk_core / 8, the same rate and the same PLL as the
+//            pixel clock, so the video crossing is a timed synchronous path.
+//   ROM      data slot 1 -> pk_io -> ioctl stream -> boot ROM + DCS image,
+//            both stored in SDRAM by ki_memory_bridge_pocket.
+//   memory   the core's SDR SDRAM pins go to the Pocket's 64 MB dram_* bus.
 //   video    320x240 RGB555 at 6.25 MHz into the APF DDR converters.
 //   audio    DCS mono 31.25 kHz into sound_i2s (48 kHz I2S).
-//   disk     NOT connected. img_size = 0, so the core reports no hard disk.
-//   DCS ROM  NOT backed. The core streams the 4 MiB sound ROM from DDR3 on
-//            MiSTer; the Pocket has no DDR3. Here the DDR port answers 0xFF
-//            immediately, so the stream cannot hang but the audio program is
-//            invalid. This is the largest remaining piece of work.
+//   disk     data slot 2, deferred: ki_ata asks pk_io for sectors, pk_io asks
+//            the APF for them (target dataslot read/write).
+//   DDR3     none on the Pocket; the core's DDRAM port is tied off.
 `default_nettype none
 
 module ki_pocket_top (
@@ -86,17 +82,21 @@ module ki_pocket_top (
 	output wire        pll_locked_o
 );
 	// ---------------------------------------------------------------- clocks
-	wire clk_core, clk_mem, clk_pix, clk_pix_90, pll_locked;
+	// One PLL for the whole design; see ki_pll.sv for the table.
+	wire clk_core, clk_sdram_pin, clk_sdram_ctl, clk_sdram_cap;
+	wire clk_pix, clk_pix_90, pll_locked;
 	wire core_pll_locked, core_sdram_ready;
 
 	ki_pll u_pll (
-		.refclk     (clk_74a),
-		.rst        (1'b0),
-		.clk_core   (clk_core),      // 50 MHz = emu's CLK_50M
-		.clk_mem    (clk_mem),       // 100 MHz (unused here; the core makes its own)
-		.clk_pix    (clk_pix),       // 6.25 MHz APF pixel clock
-		.clk_pix_90 (clk_pix_90),
-		.locked     (pll_locked)
+		.refclk        (clk_74a),
+		.rst           (1'b0),
+		.clk_sys       (clk_core),
+		.clk_sdram_pin (clk_sdram_pin),
+		.clk_sdram_ctl (clk_sdram_ctl),
+		.clk_sdram_cap (clk_sdram_cap),
+		.clk_pix       (clk_pix),
+		.clk_pix_90    (clk_pix_90),
+		.locked        (pll_locked)
 	);
 	assign pll_locked_o = pll_locked & core_pll_locked;
 
@@ -162,6 +162,9 @@ module ki_pocket_top (
 		.pad_key                    (pad_key),
 		.apf_dataslot_complete      (apf_dataslot_complete),
 		.ref_pll_locked             (pll_locked),
+		.clk_sdram_pin_i            (clk_sdram_pin),
+		.clk_sdram_ctl_i            (clk_sdram_ctl),
+		.clk_sdram_cap_i            (clk_sdram_cap),
 		.core_pll_locked            (core_pll_locked),
 		.core_sdram_ready           (core_sdram_ready),
 		.loader_overflow            (loader_overflow),
@@ -212,8 +215,7 @@ module ki_pocket_top (
 		.SD_CS            (SD_CS),
 		.SD_CD            (1'b1),
 
-		// No DDR3 on the Pocket. Answer every beat immediately with 0xFF so the
-		// DCS ROM stream cannot hang; the program it receives is invalid.
+		// No DDR3 on the Pocket: tied off. The DCS ROM lives in SDRAM.
 		.DDRAM_CLK        (DDRAM_CLK),
 		.DDRAM_BUSY       (1'b0),
 		.DDRAM_BURSTCNT   (DDRAM_BURSTCNT),
@@ -255,9 +257,10 @@ module ki_pocket_top (
 	assign dram_cs_n = 1'b0;
 
 	// ---------------------------------------------------------------- video to APF
-	// CE_PIXEL is 6.25 MHz (CLK_VIDEO / 8) and clk_pix is 6.25 MHz from the same
-	// PLL, so one register stage is enough: hold the pixel on clk_core at the
-	// CE_PIXEL edge and let apf_top sample it 160 ns later.
+	// CE_PIXEL is clk_core / 8 and clk_pix is the same PLL's /144 output with
+	// its edges on clk_core edges, so this is a synchronous crossing and the
+	// Timing Analyzer checks it whichever of the eight clk_core edges CE_PIXEL
+	// happens to fall on.
 	reg  [23:0] v_rgb = 24'd0;
 	reg         v_de  = 1'b0;
 	reg         v_hs  = 1'b0;

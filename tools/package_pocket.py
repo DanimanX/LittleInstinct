@@ -17,7 +17,7 @@ Generates bitstream.rbf_r (bit-reversed per APF requirement) and structures:
         Killer Instinct (v1.5d).json
         Killer Instinct 2 (v1.4).json
 
-Also produces a ready-to-extract ZIP archive: Release/LittleInstinct_Pocket_v1.0.0.zip
+Also produces a ready-to-extract ZIP archive: Release/LittleInstinct_Pocket_v<version>.zip (version from core.json)
 """
 
 import os
@@ -132,7 +132,10 @@ Run 'python3 tools/check_setup.py' to verify the exact file sizes and checksums.
     print(f"[+] Wrote: {readme_common}")
 
     # Generate ZIP
-    zip_name = "LittleInstinct_Pocket_v1.0.0.zip"
+    import json
+    with open(os.path.join(apf_path, "Cores", core_id, "core.json")) as f:
+        version = json.load(f)["core"]["metadata"]["version"]
+    zip_name = f"LittleInstinct_Pocket_v{version}.zip"
     zip_path = os.path.join(out_path, zip_name)
     print(f"[*] Packaging ZIP: {zip_path}")
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:

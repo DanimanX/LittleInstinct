@@ -5,7 +5,8 @@
 # own files.qip is the authority for what belongs in the core; this list is that
 # file minus KillerInstinct.sv (the MiSTer board shell, replaced by
 # pocket_rtl/ki_pocket_top.sv) and minus rtl/pll.qip (MiSTer's 50 MHz-reference
-# PLL, replaced by pocket_rtl/ki_pll.sv, whose reference is the Pocket's 74.25 MHz).
+# PLL, replaced by pocket_rtl/ki_pll.sv, the design's only PLL, on the Pocket's
+# 74.25 MHz).
 #
 # The CPU, DCS and ATA files are listed from milestone 1 so the file set is
 # complete; Quartus only elaborates what is instantiated, so listing them costs
@@ -40,8 +41,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) r
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_board_io.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_ata.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_dcs_audio.sv ]
-# the ADSP, narrowed to the instruction subset the DCS firmware executes
-set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/adsp2105_pocket.sv ]
+# the ADSP: a structural rewrite of upstream's rtl/dcs/adsp2105.sv, half its
+# area, proven clock-for-clock identical by tests/sim/tb_adsp_lockstep.sv
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/dcs/adsp2105_lean.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fast_fill.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_fb_ram.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_framebuffer.sv ]
@@ -73,8 +75,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) p
 
 # the core itself, as upstream ships it with the shell swapped out
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_core_pocket.sv ]
-# the core's own PLL (50 MHz reference -> clk_core/clk_cpu/SDRAM phases)
-set_global_assignment -name QIP_FILE [file join $::quartus(qip_path) rtl/pll.qip ]
+# (upstream's rtl/pll.qip is NOT listed: every clock comes from pocket_rtl/ki_pll.sv)
 
 # ---- APF core top (core/): template parts, as every openFPGA core uses them
 set_global_assignment -name VERILOG_FILE [file join $::quartus(qip_path) core/core_top.v ]

@@ -35,6 +35,10 @@ module emu
 	// host's end-of-stream marker for the ROM slot.
 	input         apf_dataslot_complete,
 	input         ref_pll_locked,
+	// The SDRAM clocks, from the same PLL as CLK_50M (pocket_rtl/ki_pll.sv).
+	input         clk_sdram_pin_i,
+	input         clk_sdram_ctl_i,
+	input         clk_sdram_cap_i,
 	output        core_pll_locked,
 	output        core_sdram_ready,
 	output        loader_overflow,
@@ -203,60 +207,35 @@ wire [15:0] sd_buff_dout;
 wire [15:0] sd_buff_din;
 wire sd_buff_wr;
 
-// Every clock in the core, and what each one is FOR. None of these names
-// carries a frequency.
+// Every clock in the core comes from ONE PLL in ki_pocket_top (ki_pll.sv); the
+// table of frequencies and phases is there. This module no longer owns a PLL.
 //
-//   wire              PLL out   freq     phase   purpose
-//   clk_core          0         50 MHz   0       video, I/O, bridge, debug
-//   clk_cpu           1         50 MHz   250 ps  the MIPS core. Same rate as
-//                                                clk_core but NOT phase
-//                                                aligned, so the crossing is
-//                                                an asynchronous CDC and runs
-//                                                through synchronisers
-//                                                (SYNC_CROSSING = 0); see
-//                                                pocket_ki.sdc.
-//   clk_ddr           2         100 MHz  0       DDRAM_CLK and the bridge's
-//                                                DDR side
-//   clk_sdram_pin     3         100 MHz  6750ps  leaves the chip as SDRAM_CLK
-//   clk_sdram_ctl     4         100 MHz  500ps   ki_sdram_burst's logic
-//   clk_sdram_cap     5         100 MHz  1500ps  captures SDRAM_DQ in the
-//                                                device's data eye
-//
-// clk_cpu and clk_ddr are configured identically, so Quartus MERGES them onto
-// one network - general[2] does not appear in the STA clock list at all. They
-// are kept as two wires because they have two unrelated jobs, and because the
-// merge is the fitter's decision to make, not this file's.
+//   clk_core        CLK_50M          video, I/O, bridge, debug, DCS
+//   clk_cpu         CLK_50M          the MIPS core: the SAME net as clk_core.
+//                                    The first port ran it on a second 50 MHz
+//                                    output 250 ps late and declared the pair
+//                                    asynchronous, which left every path between
+//                                    the CPU and the bridge untimed. On one net
+//                                    they are ordinary register-to-register
+//                                    paths and the Timing Analyzer checks them.
+//                                    SYNC_CROSSING stays 0: the synchronisers
+//                                    are harmless on a common clock, and that is
+//                                    the configuration that ran on hardware.
+//   clk_ddr         CLK_50M          the bridge's (unused) DDR side
+//   clk_sdram_pin   100 MHz          leaves the chip as SDRAM_CLK
+//   clk_sdram_ctl   100 MHz          ki_sdram_burst's logic
+//   clk_sdram_cap   100 MHz          captures SDRAM_DQ
 //
 // Inside the CPU, clk_cpu arrives as clk93 and clk_core as clk1x. Those names
-// come from the N64 core this CPU is derived from (93.75 and 62.5 MHz) and are
-// wrong here - but the `_93` and `_1x` SUFFIXES on ~28 signals below them are
-// a domain tag that CDC code depends on, so renaming the clocks without
-// renaming every suffix would be worse than leaving both. This table is the
-// mapping.
-//
-// The SDRAM phases above cannot be derived from nominal timing;
-// rtl/pll/pll_0002.v records why.
-wire clk_core;
-wire clk_cpu;
-wire clk_ddr;
-wire clk_sdram_pin;
-wire clk_sdram_ctl;
-wire clk_sdram_cap;
-wire pll_locked;
-
-// Keep this instance name aligned with sys/sys_top.sdc's core clock group.
-pll pll
-(
-	.refclk(CLK_50M),
-	.rst(~ref_pll_locked),
-	.outclk_0(clk_core),
-	.outclk_1(clk_cpu),
-	.outclk_2(clk_ddr),
-	.outclk_3(clk_sdram_pin),
-	.outclk_4(clk_sdram_ctl),
-	.outclk_5(clk_sdram_cap),
-	.locked(pll_locked)
-);
+// come from the N64 core this CPU is derived from; the `_93` and `_1x` suffixes
+// on ~28 signals are a domain tag the CDC code depends on.
+wire clk_core      = CLK_50M;
+wire clk_cpu       = CLK_50M;
+wire clk_ddr       = CLK_50M;
+wire clk_sdram_pin = clk_sdram_pin_i;
+wire clk_sdram_ctl = clk_sdram_ctl_i;
+wire clk_sdram_cap = clk_sdram_cap_i;
+wire pll_locked    = ref_pll_locked;
 
 assign core_pll_locked  = pll_locked;
 assign core_sdram_ready = sdram_ready;

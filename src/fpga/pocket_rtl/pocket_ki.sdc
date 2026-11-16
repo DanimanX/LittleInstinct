@@ -1,83 +1,81 @@
 # Timing constraints for the Pocket build.
 #
-# Adapted from upstream KillerInstinct.sdc, which was written for MiSTer's
-# hierarchy (emu|pll|...) and its SDRAM_* ports. Here the core sits at
-# ic|iki|u_core and its SDR SDRAM pins leave the device as dram_*.
+# Every clock comes from ONE PLL (pocket_rtl/ki_pll.sv) on clk_74a:
 #
-# The reasoning in upstream's file applies unchanged and is not repeated; what
-# matters is which constraints are load-bearing:
+#   counter[0]  clk_sys         50 MHz   0        CPU, bridge, video, I/O, DCS
+#   counter[1]  clk_sdram_pin  100 MHz   6806 ps  -> dram_clk (KI_SDRAM_CLK)
+#   counter[2]  clk_sdram_ctl  100 MHz    556 ps  ki_sdram_burst
+#   counter[3]  clk_sdram_cap  100 MHz   1389 ps  captures dram_dq
+#   counter[4]  clk_pix        6.25 MHz  0        APF pixel clock
+#   counter[5]  clk_pix_90     6.25 MHz  40 ns    APF pixel clock + 90 degrees
 #
-#   * clk_core (PLL out 0, 50 MHz) and clk_cpu (out 1, ALSO 50 MHz) are two
-#     outputs of one PLL that are NOT phase aligned - out 1 carries a 250 ps
-#     offset. Quartus therefore pairs a clk_core launch edge with a clk_cpu
-#     latch edge 0.25 ns later and gives every crossing ~12 ns of budget
-#     instead of 20, which is how the CPU's response FIFO came to fail setup
-#     by -6.5 ns. The crossing is an asynchronous CDC and is declared as one
-#     below; the CPU runs it through its two-flop synchronisers
-#     (SYNC_CROSSING = 0 in ki_core_pocket.sv). Do not "fix" the phase by
-#     making these clocks related again.
-#   * clk_cpu is asynchronous to the SDRAM pin clock (out 3); declare that, or
-#     every unrelated path across them is timed as if it had to meet 10 ns.
-#   * clk_core -> clk_sdram_ctl (out 4) is a 2-clock window (upstream line 116).
-#   * the SDRAM capture clock (out 5) gets 2 clocks from KI_SDRAM_CLK.
+# They are all RELATED, and nothing below says otherwise: the only clocks cut
+# from them are the APF bridge's (clk_74a, clk_74b, bridge_spiclk), whose
+# crossings go through a dual-clock FIFO or two-flop synchronisers in pk_io
+# and core_bridge_cmd.
+#
+# The earlier two-PLL build declared the CPU clock and then the SDRAM pin clock
+# asynchronous to the rest. That removed the SDRAM interface and the whole
+# CPU <-> bridge boundary from timing analysis; the build "met timing" and
+# failed the SDRAM self-test on hardware. Do not add clock groups inside the
+# PLL to make a failing path go away.
+#
+# Clock names are written out in full. Do NOT factor the common prefix into a
+# Tcl variable and use it inside {...}: braces suppress substitution, the
+# collection comes back empty, and Quartus ignores the constraint with only a
+# warning.
 
 derive_pll_clocks
 derive_clock_uncertainty
 
-# Clock names are written out in full. Do NOT factor the common prefix into a
-# Tcl variable and use it inside {...}: braces suppress substitution, the
-# collections come back empty, and Quartus ignores the constraint with only a
-# warning (this cost a build cycle - the slack did not move a thousandth).
-
 # ---- the SDRAM clock as it leaves the device --------------------------------
 create_generated_clock -name KI_SDRAM_CLK \
-  -source [get_pins -compatibility_mode {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk}] \
+  -source [get_pins -compatibility_mode {ic|iki|u_pll|pll_i|cyclonev_pll|counter[1].output_counter|divclk}] \
   [get_ports {dram_clk}]
 
-# ---- Asynchronous Clock Groups -----------------------------------------------
-# Group 1: APF bridge & input PLL clocks (clk_74a, clk_74b, bridge_spiclk, u_pll).
-# Group 2: Core PLL main clocks (clk_core 50MHz, sdram_ctl 100MHz, sdram_cap 100MHz).
-#          Crossings between general[0] and general[4]/[5] are bounded by multicycle paths.
-# Group 3: Core CPU clock (clk_cpu 50MHz). Carries a 250ps phase offset from clk_core.
-#          Crosses through explicit synchronisers.
-# Group 4: SDRAM pin clock (clk_sdram_pin 100MHz, dram_clk).
+# ---- the APF bridge is asynchronous to the core ------------------------------
 set_clock_groups -asynchronous \
-  -group [get_clocks {clk_74a clk_74b bridge_spiclk ic|iki|u_pll|*divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk \
-                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk \
-                      ic|iki|u_core|pll|pll_inst|altera_pll_i|general[5].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[1].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -group [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[3].gpll~PLL_OUTPUT_COUNTER|divclk KI_SDRAM_CLK}]
+  -group [get_clocks {clk_74a clk_74b bridge_spiclk}] \
+  -group [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[0].output_counter|divclk \
+                      ic|iki|u_pll|pll_i|cyclonev_pll|counter[1].output_counter|divclk \
+                      ic|iki|u_pll|pll_i|cyclonev_pll|counter[2].output_counter|divclk \
+                      ic|iki|u_pll|pll_i|cyclonev_pll|counter[3].output_counter|divclk \
+                      ic|iki|u_pll|pll_i|cyclonev_pll|counter[4].output_counter|divclk \
+                      ic|iki|u_pll|pll_i|cyclonev_pll|counter[5].output_counter|divclk \
+                      KI_SDRAM_CLK}]
 
-# ---- Asynchronous Reset Paths -----------------------------------------------
+# ---- asynchronous reset -------------------------------------------------------
 set_false_path -from [get_keepers {*rst_sync[*]}]
 
-# ---- SDRAM board timing -----------------------------------------------------
-# Same numbers upstream uses: the Pocket's DRAM part is a 512 Mbit x16 like
-# MiSTer's, at the same 100 MHz.
+# ---- SDRAM board timing -------------------------------------------------------
+# Upstream's numbers: the Pocket's DRAM is a 512 Mbit x16 part at 100 MHz, as
+# MiSTer's is.
 set_input_delay  -clock KI_SDRAM_CLK -max 6.0 [get_ports {dram_dq[*]}]
 set_input_delay  -clock KI_SDRAM_CLK -min 2.5 [get_ports {dram_dq[*]}]
 set_output_delay -clock KI_SDRAM_CLK -max 1.5 \
-  [get_ports {dram_a[*] dram_ba[*] dram_dqm[*] dram_cke dram_ras_n dram_cas_n dram_we_n}]
+  [get_ports {dram_a[*] dram_ba[*] dram_dq[*] dram_dqm[*] dram_cke dram_ras_n dram_cas_n dram_we_n}]
 set_output_delay -clock KI_SDRAM_CLK -min -0.8 \
-  [get_ports {dram_a[*] dram_ba[*] dram_dqm[*] dram_cke dram_ras_n dram_cas_n dram_we_n}]
+  [get_ports {dram_a[*] dram_ba[*] dram_dq[*] dram_dqm[*] dram_cke dram_ras_n dram_cas_n dram_we_n}]
 
-# ---- two-clock windows between the core and the SDRAM controller ------------
+# ---- two-clock windows between the core and the SDRAM controller --------------
+# clk_sys -> clk_sdram_ctl: the request is held for a whole clk_sys period.
 set_multicycle_path -setup -end \
-  -from [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -to   [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] 2
+  -from [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[0].output_counter|divclk}] \
+  -to   [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[2].output_counter|divclk}] 2
 set_multicycle_path -hold -end \
-  -from [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[0].gpll~PLL_OUTPUT_COUNTER|divclk}] \
-  -to   [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] 1
+  -from [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[0].output_counter|divclk}] \
+  -to   [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[2].output_counter|divclk}] 1
 
+# dram_dq is sampled on the capture clock edge after the one nearest the
+# launching SDRAM clock edge (CAS latency accounting in ki_sdram_burst).
 set_multicycle_path -setup -end \
   -rise_from [get_clocks {KI_SDRAM_CLK}] \
-  -rise_to   [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[5].gpll~PLL_OUTPUT_COUNTER|divclk}] 2
+  -rise_to   [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[3].output_counter|divclk}] 2
 set_multicycle_path -setup -end \
   -rise_from [get_clocks {KI_SDRAM_CLK}] \
-  -rise_to   [get_clocks {ic|iki|u_core|pll|pll_inst|altera_pll_i|general[4].gpll~PLL_OUTPUT_COUNTER|divclk}] 2
+  -rise_to   [get_clocks {ic|iki|u_pll|pll_i|cyclonev_pll|counter[2].output_counter|divclk}] 2
 
-# ---- debug observability registers, crossed without a synchroniser ----------
+# ---- debug observability registers, sampled without a synchroniser ------------
 set_false_path -to [get_keepers {*|debug_cpu_pc_meta[*]}]
 set_false_path -to [get_keepers {*|debug_cpu_retired_meta[*]}]
 set_false_path -to [get_keepers {*|debug_trace_frozen_meta}]

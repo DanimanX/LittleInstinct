@@ -10,26 +10,84 @@ Analogue Pocket port of the Killer Instinct arcade core
 Covers **Killer Instinct (1994)** and **Killer Instinct 2 (1996)** — Midway KI
 hardware: R4600 MIPS III, DCS audio, ATA hard disk.
 
-## Status: Measured, Synthesized, and Successfully Fitted
+## Estado: v1.1.0 — rediseño de relojes y del DSP (2026-11-16)
 
-The project compiles, synthesizes, physically fits, and generates the complete `.rbf` bitstream for Analogue Pocket (`5CEBA4F23C8N`):
+**Compila, cabe y cierra timing en las cuatro esquinas. Falta probarlo en la
+consola**: nadie ha cargado todavía este bitstream en un Pocket.
 
-- **Unified Memory Architecture in SDRAM ([`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv)):**
-  - **Framebuffer in SDRAM:** Eliminated dependency on 2.4 Mbits of on-chip BRAM. Both CPU accesses (`FB_READ_ISSUE`, `FB_WRITE`, `FB_LINE_WRITE`) and video scanout (`VID_ISSUE` / `VID_WAIT`) read and write directly to SDRAM in 16-word bursts, integrating the write-combining buffer (`wb_gather_ok`) to coalesce 32-byte bursts per cycle.
-  - **DCS Sound ROM in SDRAM:** Completely eliminated the legacy MiSTer DDR3 mailbox. The 4 MiB DCS sound ROM (`STORE_DCS = 0x0a0_0000`) is downloaded alongside the Boot ROM directly into SDRAM via `DOWNLOAD_SDRAM_WRITE_ISSUE`. Audio ADSP reads (`dcs_rom_request`) are serviced directly from SDRAM with real sample data.
-- **CPU Datapath & Resource Optimizations ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd) & [`cpu_datacache.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_datacache.vhd)):**
-  - 32-bit GPR register file (`g_regs_32`) in MLAB under `ADDR32_ONLY`, saving half the MLAB cells and reducing routing congestion.
-  - 32-bit arithmetic, address generation, and 32-bit barrel shifter paths (`calcResult_shiftL`/`calcResult_shiftR`), eliminating 65-bit shifter routing delays.
-  - Decoupling of D-Cache write enables: `st_direct_we` prevents unclocked combinatorial writes in `IDLE` when `STORE_BUFFER` is active, completely eliminating the -4.18 ns critical path from `itagram` to `portbwe`.
-  - Disconnected tag match dependency from `sb_drain_idle` (`sb_fwd_sel`), removing tag lookup from data RAM port b arbitration.
-- **Physical Device Metrics (Cyclone V 5CEBA4F23C8), build v1.0.17:**
-  - **Logic Utilization (ALMs):** **18,230 / 18,480 (99%)**, **1,847 / 1,848 LABs**.
-  - **Block Memory Bits:** **1,525,344 / 3,153,920 (48%)**.
-  - **DSP Blocks:** **23 / 66 (35%)**.
-  - **Timing:** Completely closed for Hold (+0.120 ns worst-case) and Recovery (+15.387 ns); inter-PLL asynchronous clock groups and `set_false_path -from [get_keepers {*rst_sync[*]}]` established in [`pocket_ki.sdc`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/pocket_ki.sdc).
-  - **Generated Bitstream:** [`pocket_ki.rbf`](file:///PROCESOS/LittleInstinct/src/fpga/output_files/pocket_ki.rbf) (1.8 MB, MD5 `41d97ad4990f7bc034bceb74897ea77b`).
-  - **APF Release Package:** Synchronized to SD card under [`Release/`](file:///PROCESOS/LittleInstinct/Release/) with bit-reversed [`bitstream.rbf_r`](file:///PROCESOS/LittleInstinct/Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r) (MD5 `d66c296ca6624954ce65ff0b8ef95f33`) and ready-to-extract ZIP archive [`LittleInstinct_Pocket_v1.0.0.zip`](file:///PROCESOS/LittleInstinct/Release/LittleInstinct_Pocket_v1.0.0.zip).
-  - **Hardware status:** Ready for hardware testing on Analogue Pocket to verify SDRAM boot sequence (`SD:1`, `BOOT:1`, `RST:0`) and capture software departure telemetry (`EX`, `DO`, `DP:8802EC4C`).
+Las versiones 1.0.x no arrancaban de forma fiable por dos defectos de diseño,
+no por bugs sueltos. v1.1.0 corrige ambos:
+
+| | v1.0.19 | v1.1.0 |
+|---|---|---|
+| PLLs | 2 en cascada (74,25 → 50 MHz → relojes del core) | **1** (`pocket_rtl/ki_pll.sv`) |
+| Reloj de CPU | salida propia, 250 ps desfasada, declarada asíncrona | **la misma red** que el resto del sistema |
+| Reloj del pin SDRAM | declarado asíncrono a su controlador: la E/S de la SDRAM **no se analizaba** | relacionado; `dram_dq`/`dram_a` se analizan |
+| Píxel a 90° (`clk_pix_90`) | salía a 0° | 90° |
+| DSP de audio (ADSP-2105) | 7.944 ALMs, camino crítico del diseño | **reescrito**: ~4.000 ALMs, equivalente ciclo a ciclo |
+| Ocupación | 18.252 / 18.480 ALMs (99 %) | **13.895 / 18.480 (75 %)** |
+| Peor setup | **−2,55 ns** (dentro del DSP) | **+0,385 ns** |
+| Peor hold | +0,116 ns (con la SDRAM fuera del análisis) | **+0,045 ns** (con la SDRAM dentro) |
+
+Qué explica los síntomas vistos en consola:
+
+- **`SD:0` desde v1.0.17** (la SDRAM no pasa su autotest). Para "cerrar" hold,
+  esa versión declaró asíncrono el reloj del pin SDRAM. Eso no arregla nada:
+  saca la interfaz del análisis, y el fitter queda libre de colocarla mal.
+- **Reinicio tras el bip / `RDY` inestable.** El DSP funcionaba con −2,5 ns de
+  setup. Ya lo advertía la sección de deuda técnica; con el diseño al 99 % no
+  había forma de arreglarlo sin rehacer el bloque.
+
+El DSP nuevo (`pocket_rtl/dcs/adsp2105_lean.sv`) no se "cree" correcto: se
+ejecuta al lado del original de MiSTer con las mismas entradas y se comparan
+todas las salidas en cada ciclo de reloj (ROM de sonido real y programas
+aleatorios, ~3 millones de ciclos por corrida, sin diferencias).
+
+### Pasos a seguir
+
+1. **Instalar.** Descomprimir `Release/LittleInstinct_Pocket_v1.1.0.zip` en la
+   raíz de la microSD (o copiar `Release/sd_card/`). Las ROM y la imagen de
+   disco van en `Assets/killerinstinct/common/` como siempre (ver
+   "What you supply").
+2. **Arrancar Killer Instinct y mirar la página de estado** (Start+Select).
+   Anotar o fotografiar la fila `RST / BOOT / PLL / HDD / SD / RX / RDY`.
+3. **Interpretar:**
+   - `SD:1 BOOT:1 RX:00480000` y el juego llega a la demo → funciona. Probar
+     audio, mandos y una partida completa; después KI2.
+   - `SD:0` → la captura de lectura de la SDRAM no cae en el ojo de datos de
+     *esta* placa. Es el único margen estrecho del diseño (~0,4 ns). Cambiar la
+     fase de `clk_sdram_cap` un paso (139 ps) en `ki_pll.sv`
+     (`c_cnt_ph_mux_prst3`: 2 → 1 o 3), actualizar la tabla de
+     `tools/check_fit.py`, recompilar. La cabecera de `ki_pll.sv` tiene la
+     tabla de lo ya medido.
+   - `SD:1` pero se reinicia tras el bip → ya no es timing. Usar la captura
+     `V / C / DP / DO / EX` de la página de estado (secciones 11 y 12 más
+     abajo) para ver desde qué dirección salta el juego.
+   - Sin imagen → revisar primero `PLL:`; el PLL único es nuevo.
+4. **Cualquier cambio de RTL** sigue siempre este orden:
+   ```bash
+   tests/sim/run_adsp_lockstep.sh roms/kinst.rom   # solo si se tocó el DSP: debe decir ALL PASS
+   tests/sim/run.sh                                # bancos del cargador y arranque
+   tools/build_pocket.sh                           # Quartus + puerta de release
+   python3 tools/package_pocket.py                 # Release/sd_card + zip versionado
+   ```
+   `build_pocket.sh` termina ejecutando `tools/check_fit.py`, que **rechaza el
+   build** si el PLL no salió como está diseñado, si hay slack negativo en
+   cualquier esquina o si Quartus ignoró una constraint. No empaquetar un
+   build que no pase esa puerta, y no añadir `set_clock_groups` entre relojes
+   del PLL para hacerla pasar: ese fue el error de v1.0.17.
+5. **Subir versión** en `apf/Cores/littleinstinct.KillerInstinct/core.json`
+   antes de empaquetar; el zip toma el número de ahí.
+
+Hay ahora 4.585 ALMs libres (25 %). Lo que antes no cabía (FPU, caché de
+disco en PSRAM, más instrumentación) vuelve a ser posible, pero solo después
+de confirmar el arranque en consola.
+
+Limitaciones conocidas de esta versión: el margen de captura de la SDRAM
+(+0,385 ns setup / +0,045 ns hold) es positivo pero estrecho y está calculado
+con los retardos de placa de upstream (MiSTer), no medidos en el Pocket; y la
+equivalencia del DSP está probada contra el `adsp2105.sv` de upstream, no
+contra un ADSP-2105 real.
 
 ## Layout
 
@@ -41,13 +99,14 @@ src/fpga/                                the Pocket Quartus project
   apf/                                   Analogue APF framework, unmodified
   core/                                  core_top + core_bridge_cmd + I2S
   pocket_rtl/                            Pocket-specific overrides and bridges:
-    ki_pll.sv, ki_pocket_top.sv          clock tree and top-level core wrapper
+    ki_pll.sv, ki_pocket_top.sv          the single PLL and top-level core wrapper
+    pocket_ki.sdc                        timing constraints (all PLL clocks related)
     ki_core_pocket.sv                    top-level KI arcade board for Pocket
     ki_memory_bridge_pocket.sv           off-chip SDRAM/PSRAM memory bridge + FB line buffer
     pk_io.sv                             APF bridge -> ioctl_wr & ATA disk streaming (Slot 2)
     cpu/cpu_pocket.vhd                   trimmed R4600 CPU (no FPU, ADDR32_ONLY, WB D-Cache)
     cpu/r4600_64in32_micro.sv            32-bit MIPS-III micro-sequencer for 64-bit ops
-    sound/adsp2105_pocket.vhd            opcode/shifter-trimmed ADSP-2105 DCS audio core
+    dcs/adsp2105_lean.sv                 structural ADSP-2105, lockstep-equal to upstream's
 docs/FEASIBILITY.md                      first fit measurement (block RAM wall)
 docs/REENGINEERING.md                    re-engineering pass: where every bit and ALM
                                          goes, and what closes the gap
@@ -61,7 +120,9 @@ apf/Cores/littleinstinct.KillerInstinct/ core.json, data.json, info.txt
 apf/Platforms/killerinstinct.json
 apf/Assets/killerinstinct/littleinstinct.KillerInstinct/
                                          one JSON per game
-tools/build_pocket.sh                    Quartus compile -> pocket_ki.rbf
+tools/build_pocket.sh                    Quartus compile -> pocket_ki.rbf, then the gate
+tools/check_fit.py                       release gate: PLL, slack, ignored constraints
+tests/sim/run_adsp_lockstep.sh           DSP equivalence against upstream
 tools/measure/measure_fit.sh             fit-measurement harness (see docs/REENGINEERING.md)
 tools/fetch_references.sh                re-fetch the reference Pocket core
 tools/build_rom.py                       MAME zip + MRA -> .rom (CRC-checked)
@@ -97,7 +158,7 @@ To fit the system within the Cyclone V's **18,480 ALMs / 1,848 LABs** and reach 
 
 1. **R4600 FPU Removal (`FPU_STUB` in `src/fpga/pocket_rtl/cpu/cpu_pocket.vhd`):**
    - Killer Instinct 1 & 2 are 100% fixed-point games (`CP1` is never enabled in `CP0.Status`). Stubbing `CP1` frees **2,466 ALMs (147 LABs)** and **8 DSP blocks**.
-2. **ADSP-2105 Opcode & Barrel-Shifter Trimming (`src/fpga/pocket_rtl/sound/adsp2105_pocket.vhd`):**
+2. **ADSP-2105 Opcode & Barrel-Shifter Trimming (superseded in v1.1.0 by the structural rewrite `pocket_rtl/dcs/adsp2105_lean.sv`, which keeps every opcode and is half the size):**
    - Static analysis of the 4 MB DCS sound ROMs (`tools/measure/dcs_opcodes.py` / `docs/ADSP_SUBSET.md`) proves the audio firmware only uses **41 of 256 instruction classes** and **4 of 16 barrel-shifter modes** (`LSHIFT` 0–3). Pruning the unused datapath frees **80 LABs in isolation (12 LABs net in full-core fit)**.
 3. **32-bit Physical/Virtual Addressing (`ADDR32_ONLY`, `NO_TRAP_INSTR`, `INSTR_KSEG_ONLY`):**
    - KI runs exclusively in `KSEG0` (`0x8000_0000` cached) and `KSEG1` (`0xA000_0000` uncached). Cutting the 64-bit TLB/address comparison paths to 32 bits and removing unused MIPS-III trap instructions (`TGE`/`TLT`/`TEQ`/`TNE`) saves **~600 ALMs**.
@@ -110,7 +171,7 @@ To fit the system within the Cyclone V's **18,480 ALMs / 1,848 LABs** and reach 
 5. **Unified SDRAM Arbiter Removal of Legacy DDR3 Mailbox (`src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv`):**
    - Replaces the legacy MiSTer dual-controller paths (SDRAM + Avalon DDR3 mailbox) with a single unified arbiter over `dram_*`.
 
-#### Measured vs. Target Resource Breakdown (`5CEBA4F23C8`)
+#### Measured vs. Target Resource Breakdown (`5CEBA4F23C8`, v1.0.x — historical; v1.1.0 totals 13,895 ALMs)
 
 | Subsystem / Module | Current Fit (ALMs) | Target w/ 64-in-32 Microcode (ALMs) | Equivalent LEs (~2.66 LE/ALM) | M10K Blocks (of 308) | DSP Blocks (of 66) |
 | :--- | ---: | ---: | ---: | ---: | ---: |
@@ -195,10 +256,10 @@ flowchart LR
    - The R4600 uses **8 of 66 DSP blocks** for its 32×32 hardware multiplier (`MULT`/`MULTU`), which the game's software blitter uses continuously for affine sprite scaling and zoom calculations.
    - The ADSP-2105 uses **13 of 66 DSP blocks** for its 16×16 MAC audio mixing pipeline.
    - **45 DSP blocks remain free** for optional hardware color-blending or scaling offloading.
-2. **Write-Back D-Cache Framebuffer Optimization ([`cpu_pocket.vhd`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd)):**
+2. **Write-Back D-Cache Framebuffer Optimization ([`cpu_pocket.vhd`](src/fpga/pocket_rtl/cpu/cpu_pocket.vhd)):**
    - **`DCACHE_SKIP_FILL`:** When the CPU writes to a cold cache line in the framebuffer (`0x0003_0000 .. 0x0007_FFFF`), the D-Cache **skips reading the 32-byte line from SDRAM** and allocates the line directly in `M10K` with per-byte dirty masks (`dcache_valid_bytes`). This eliminates 50% of external SDRAM bus traffic during sprite blitting.
-   - **`DCACHE_FB_PARTIAL`:** On write-back eviction of a framebuffer line, only valid/dirty words are burst-written to SDRAM by [`ki_memory_bridge_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv).
-3. **Dual-Line M10K Scanout ([`ki_framebuffer.sv`](file:///PROCESOS/LittleInstinct/src/fpga/rtl/ki_framebuffer.sv)):**
+   - **`DCACHE_FB_PARTIAL`:** On write-back eviction of a framebuffer line, only valid/dirty words are burst-written to SDRAM by [`ki_memory_bridge_pocket.sv`](src/fpga/pocket_rtl/ki_memory_bridge_pocket.sv).
+3. **Dual-Line M10K Scanout ([`ki_framebuffer.sv`](src/fpga/rtl/ki_framebuffer.sv)):**
    - Instead of holding a 300 KB framebuffer in on-chip BRAM, `ki_framebuffer.sv` uses **two 320×16-bit M10K scanline buffers (~1.25 KB total)**. While line $N$ is scanned out at 6.25 MHz to the APF scaler (`RGB555` expanded to 24-bit `RGB888`), `ki_memory_bridge_pocket.sv` burst-reads line $N+1$ from SDRAM during horizontal blanking.
 
 ## Building
@@ -207,7 +268,7 @@ flowchart LR
 tools/build_pocket.sh          # requires Quartus Prime 25.1+ with Cyclone V support
 ```
 
-Produces `src/fpga/output_files/pocket_ki.rbf`.
+Produces `src/fpga/output_files/pocket_ki.rbf` and runs `tools/check_fit.py`; a non-zero exit means the build must not be packaged.
 
 ## What you supply
 
@@ -232,7 +293,7 @@ tools/check_setup.py roms/
 
 ## On the SD card
 
-A pre-packaged archive ready to extract directly to the microSD card root is provided in [`Release/LittleInstinct_Pocket_v1.0.0.zip`](file:///PROCESOS/LittleInstinct/Release/LittleInstinct_Pocket_v1.0.0.zip):
+A pre-packaged archive ready to extract directly to the microSD card root is provided in `Release/LittleInstinct_Pocket_v<version>.zip`:
 
 ```
 Cores/littleinstinct.KillerInstinct/{core,data}.json, info.txt
@@ -317,7 +378,7 @@ Registro de errores de inicialización del framework APF detectados en hardware 
 
 ### 6. Pantalla congelada en color lila/morado (Truncamiento en FIFO de Cruce de Reloj ATA y Handshake de Disco)
 - **Síntoma:** Al seleccionar el juego, la barra inferior de carga se completa al 100%, la CPU arranca y ejecuta con éxito el POST (llenando la pantalla verticalmente en color lila/morado durante el auto-test de memoria), pero se queda congelada al final del test sin iniciar la atracción ni reproducir el sonido de inicio.
-- **Causa raíz en RTL ([`pk_io.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/pk_io.sv)):**
+- **Causa raíz en RTL ([`pk_io.sv`](src/fpga/pocket_rtl/pk_io.sv)):**
   - Al finalizar el POST de RAM, la CPU transfiere el control a leer el sector 0 del disco duro (`kinst.img`) a través del controlador IDE/ATA (`ki_ata.sv` $\leftrightarrow$ `pk_io.sv` $\leftrightarrow$ APF target dataslot read `0x0180`).
   - La señal `fifo_din` hacia la FIFO de cruce de reloj APF (`clk_74a`) a Core (`clk_core`) empaquetaba:
     `{disk_win_hit (1b), bridge_addr[12:2] (11b), bridge_wr_data (32b)}` = **44 bits**.
@@ -335,14 +396,14 @@ Registro de errores de inicialización del framework APF detectados en hardware 
 
 ### 7. Pantalla congelada en scanline 0 con barras residuales (`img_reset` interrumpiendo a la CPU)
 - **Síntoma:** Al seleccionar el juego, la pantalla carga y muestra solo la primera línea (scanline 0) en color azul/morado, pero el resto de la pantalla permanece congelada con el patrón de barras horizontales residuales de la SDRAM (`IMG_20261110_155147.jpg`).
-- **Causa raíz en RTL ([`ki_core_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_core_pocket.sv#L329)):**
+- **Causa raíz en RTL ([`ki_core_pocket.sv`](src/fpga/pocket_rtl/ki_core_pocket.sv#L329)):**
   - Al fijar `img_size = 131076608` por defecto, la condición `hdd_image_present = (img_size >= 512)` se volvió verdadera inmediatamente.
   - El framework APF de la Analogue Pocket notifica las ranuras diferidas (`deferload`) enviando el comando host `0x008A` (`Data slot update`) inmediatamente después de concluir la descarga de la ROM (`Slot 1`).
   - Para ese momento, la CPU R4600 ya había salido de reset y estaba en plena ejecución de la limpieza de framebuffer (POST de memoria).
   - Al llegar `0x008A`, pulsó `img_mounted`, lo que activó la lógica heredada de MiSTer `img_reset` (un contador de 50.000 ciclos que asserting `core_reset`).
   - Esto le propinó un **reseteo asíncrono y forzado a la CPU y al controlador SDRAM en pleno ciclo de ráfaga de memoria**, desincronizando el bus de SDRAM y abortando la CPU permanentemente en la línea 0 antes de poder barrer el resto de la pantalla.
 - **Solución RTL aplicada:**
-  - En [`ki_core_pocket.sv`](file:///PROCESOS/LittleInstinct/src/fpga/pocket_rtl/ki_core_pocket.sv), desacoplado `img_reset` fijándolo a `1'b0`. En la Analogue Pocket la imagen de disco se configura estáticamente al lanzar el core y la CPU nunca debe ser reiniciada por eventos de ranura de datos posteriores.
+  - En [`ki_core_pocket.sv`](src/fpga/pocket_rtl/ki_core_pocket.sv), desacoplado `img_reset` fijándolo a `1'b0`. En la Analogue Pocket la imagen de disco se configura estáticamente al lanzar el core y la CPU nunca debe ser reiniciada por eventos de ranura de datos posteriores.
 
 ### 8. Instrucciones para recompilar en PC con Linux y Quartus Prime
 
@@ -640,7 +701,12 @@ es `EX:` (fila 8) junto con `DP:`/`DO:` (fila 14 y fila 10).
 
 ---
 
-## Estado al 2026-11-12 (punto de continuación)
+## Histórico: estado al 2026-11-12 (v1.0.x)
+
+> Superado por v1.1.0 (ver "Estado" al principio). La deuda técnica descrita
+> abajo —`clk_core` sin cerrar dentro del ADSP y los cruces entre los dos PLL—
+> es exactamente lo que el rediseño eliminó. Se conserva por el registro de
+> mediciones en consola.
 
 Esta sección existe para retomar el trabajo sin reconstruir el contexto. Todo lo
 que sigue está medido en hardware real, no inferido, salvo lo que se marca

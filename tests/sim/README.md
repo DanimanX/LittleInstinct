@@ -44,3 +44,15 @@ the bus from a register clocked on the controller's own sampling edge, and at
 one point the return pipeline advanced on both edges and so moved twice per
 clock. All three were bench races. The model now shifts only on the falling
 edge, and the latency is a parameter rather than a hand-derivation.
+
+## DSP equivalence (`run_adsp_lockstep.sh`)
+
+```sh
+tests/sim/run_adsp_lockstep.sh                 # random-program fuzzing
+tests/sim/run_adsp_lockstep.sh roms/kinst.rom  # plus the real sound firmware
+```
+
+`tb_adsp_lockstep.sv` runs `pocket_rtl/dcs/adsp2105_lean.sv` next to upstream's
+`rtl/dcs/adsp2105.sv` with identical inputs and compares every output on every
+clock. Run it after any edit to the lean DSP; a build is only meaningful if it
+prints `ALL PASS`. Needs Icarus Verilog 12 or newer.

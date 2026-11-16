@@ -30,3 +30,7 @@ fi
 echo
 echo "---- fit summary ----"
 sed -n '1,14p' output_files/pocket_ki.fit.summary
+
+echo
+echo "---- release gate (PLL, timing, ignored constraints) ----"
+python3 "$here/tools/check_fit.py"

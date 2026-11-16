@@ -26,11 +26,11 @@ The port replaces the MiSTer *shell* and keeps the entire core.
 | `pocket_rtl/ki_core_pocket.sv` | upstream `KillerInstinct.sv` with `hps_io` swapped for `pk_io`. The only change to the core. |
 | `pocket_rtl/pk_io.sv` | the APF bridge → `ioctl_*` loader. Replaces `hps_io`. |
 | `pocket_rtl/ki_pocket_top.sv` | clocks, reset, the core, video/audio/DRAM wiring |
-| `pocket_rtl/ki_pll.sv` | 74.25 MHz → 50 MHz core / 100 MHz / 6.25 MHz pixel |
+| `pocket_rtl/ki_pll.sv` | the design's only PLL: 74.25 MHz → 50 MHz system, three 100 MHz SDRAM phases, 6.25 MHz pixel (+90°) |
 | `pocket_rtl/ki_memory_bridge_pocket.sv` | upstream bridge with the framebuffer made switchable |
 | `pocket_rtl/cpu/cpu_pocket.vhd`, `cpu_FPU_stub.vhd` | upstream CPU with the FPU replaced by a stub |
-| `pocket_rtl/adsp2105_pocket.sv` | upstream ADSP with the shifter narrowed to the executed modes |
-| `pocket_rtl/pocket_ki.sdc` | timing constraints, adapted from upstream's |
+| `pocket_rtl/dcs/adsp2105_lean.sv` | structural rewrite of upstream's ADSP-2105, same ports and clock-for-clock behaviour (`tests/sim/run_adsp_lockstep.sh`) |
+| `pocket_rtl/pocket_ki.sdc` | timing constraints; every PLL clock related, only the APF bridge cut |
 | `core/core_top.v` | APF side: bridge, command handler, pad |
 
 `upstream/` is untouched. Every change lives in `pocket_rtl/` as a copy, so the
@@ -161,5 +161,5 @@ The three behaviour-changing switches, all in `pocket_ki.qsf`:
 | Macro / file | Effect |
 |---|---|
 | `KI_FB_OFFCHIP=1` | framebuffer leaves M10K (`ki_memory_bridge_pocket.sv`) |
-| `pocket_rtl/adsp2105_pocket.sv` | ADSP shifter narrowed to LSHIFT 0-3 |
+| `pocket_rtl/dcs/adsp2105_lean.sv` | ADSP with one shared read/write/operand datapath; 4,0xx ALMs instead of 7,9xx |
 | `pocket_rtl/cpu/cpu_pocket.vhd` | CPU with `cpu_FPU_stub` instead of the FPU |
