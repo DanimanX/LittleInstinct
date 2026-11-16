@@ -656,6 +656,7 @@ wire [31:0] debug_cpu_pc;
 wire [31:0] debug_cpu_retired;
 wire [31:0] debug_cpu_irq_count;
 wire [31:0] debug_cpu_t2_reload_count;
+wire [31:0] debug_cop0_cause_live;
 // ---------------------------------------------------------------------------
 // The frozen pre-event execution trace, brought across from the CPU domain.
 //
@@ -696,6 +697,7 @@ reg  [31:0] debug_ds_first_meta = 32'd0, debug_ds_first_sync = 32'd0;
 // screen does.
 wire [31:0] dcs_pcm_health;
 wire [31:0] dcs_pcm_level;
+wire [13:0] dcs_dbg_pc;
 reg  [31:0] debug_eret_epc_meta = 32'd0,      debug_eret_epc_sync = 32'd0;
 reg  [31:0] debug_eret_target_meta = 32'd0,   debug_eret_target_sync = 32'd0;
 reg  [31:0] debug_eret_flags_meta = 32'd0,    debug_eret_flags_sync = 32'd0;
@@ -715,6 +717,8 @@ wire [31:0] debug_cpu_ret_count;
 // Captured only on the 01 path (program -> boot ROM). On the 10 path it holds
 // whatever the previous 01 departure left, which is why C: must be read too.
 wire [31:0] debug_cpu_exc_cause;
+// BadVAddr latched by the same CPU statement as debug_cpu_exc_cause.
+wire [31:0] debug_cpu_badvaddr;
 reg [31:0] debug_cpu_ret_count_meta = 32'h0, debug_cpu_ret_count_sync = 32'h0;
 // Departure capture from the CPU: the last PC executed in the decompressed
 // program (the delay slot of the branch that left, when it left by one), the
@@ -753,6 +757,7 @@ reg [31:0] debug_dep_pc_hold    = 32'd0;
 reg [31:0] debug_dep_op_hold    = 32'd0;
 reg  [1:0] debug_dep_trig_hold  = 2'd0;
 reg  [7:0] debug_dep_cause_hold = 8'd0;
+reg [31:0] debug_dep_badvaddr_hold = 32'd0;
 
 wire debug_dep_strobe = debug_dep_valid_sync & ~debug_dep_valid_d;
 
@@ -766,11 +771,13 @@ always @(posedge clk_core) begin
 		debug_dep_op_hold    <= 32'd0;
 		debug_dep_trig_hold  <= 2'd0;
 		debug_dep_cause_hold <= 8'd0;
+		debug_dep_badvaddr_hold <= 32'd0;
 	end else if (debug_dep_strobe) begin
 		debug_dep_pc_hold    <= debug_cpu_dep_pc;
 		debug_dep_op_hold    <= debug_cpu_prev_op;
 		debug_dep_trig_hold  <= debug_cpu_dep_trigger;
 		debug_dep_cause_hold <= debug_cpu_exc_cause[7:0];
+		debug_dep_badvaddr_hold <= debug_cpu_badvaddr;
 	end
 end
 (* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
@@ -830,6 +837,28 @@ localparam DEBUG_BUILD = 1;
 localparam DEBUG_TRACE = 0;
 reg [31:0] debug_ata_info_meta = 32'h0000_0000;
 reg [31:0] debug_ata_info_sync = 32'h0000_0000;
+// Interrupt decision set, crossed into clk_core.
+//
+// Until v1.0.25 this carried only {irq_sync, IP[7:0]} - the two things that
+// say an interrupt is PENDING. It said nothing about whether the CPU was
+// allowed to take one, so a run that showed IP[3:2] set and an accept count of
+// zero could not be read: "no interrupt is enabled" and "the core will not
+// accept one" produce the same screen. Those are opposite findings, and three
+// builds (v1.0.21-v1.0.25) were spent looking at IRQs without the bits that
+// separate them.
+//
+// irqTrigger in cpu_cop0.vhd is
+//   SR.IE=1 && SR.EXL=0 && SR.ERL=0 && (SR.IM & Cause.IP) != 0
+// so the missing half is IE, EXL and IM. Those are the bits added here,
+// packed into 16 bits that map straight onto three screen digits.
+//
+//   probe[15:14] irq_sync (bit 1 ATA, bit 0 vblank, as driven into the CPU)
+//   probe[13]    SR.IE
+//   probe[12]    SR.EXL
+//   probe[11:8]  SR.IM[3:0]  (bit 3 masks the ATA IRQ, bit 2 the vblank IRQ)
+//   probe[7:0]   Cause.IP[7:0] (bit 3 ATA, bit 2 vblank)
+reg [15:0] debug_cop0_probe_meta = 16'd0;
+reg [15:0] debug_cop0_probe_sync = 16'd0;
 wire [18:0] framebuffer_base;
 wire framebuffer_memory_request;
 wire [27:0] framebuffer_memory_address;
@@ -1135,6 +1164,13 @@ always @(posedge clk_core) begin
 	debug_cpu_ret_count_sync <= debug_cpu_ret_count_meta;
 	debug_ata_info_meta <= debug_ata_info;
 	debug_ata_info_sync <= debug_ata_info_meta;
+	debug_cop0_probe_meta <=
+		{debug_cop0_cause_live[31:30],  // irq_sync, substituted in ki_cpu_core
+		 debug_cop0_cause_live[0],     // SR.IE
+		 debug_cop0_cause_live[16],    // SR.EXL
+		 debug_cop0_cause_live[27:24], // SR.IM[3:0]
+		 debug_cop0_cause_live[15:8]}; // Cause.IP[7:0]
+	debug_cop0_probe_sync <= debug_cop0_probe_meta;
 	debug_ds_count_meta <= debug_cpu_ds_count;
 	debug_ds_count_sync <= debug_ds_count_meta;
 	debug_ds_first_meta <= debug_cpu_ds_first;
@@ -1242,7 +1278,11 @@ ki_cpu_core #(
 	// responses in the return FIFO, and the boot ROM's cache-flush lw at
 	// 0xBFC00400 never saw its mem_done. That is the black screen.
 	.SYNC_CROSSING(0),
+	.DCACHE_SKIP_FILL(0),
 	.DCACHE_FB_PARTIAL(0),
+	.DCACHE_WB_EARLY(0),
+	.DCACHE_STORE_BUFFER(0),
+	.DCACHE_SB_FORWARD(0),
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
 	.DCACHE_FILL_AT_MISS(0),
@@ -1301,6 +1341,8 @@ ki_cpu_core #(
 	.debug_dep_valid(debug_cpu_dep_valid),
 	.debug_dep_trigger(debug_cpu_dep_trigger),
 	.debug_exc_cause(debug_cpu_exc_cause),
+	.debug_badvaddr(debug_cpu_badvaddr),
+	.debug_cop0_cause_live(debug_cop0_cause_live),
 	.debug_ret_count(debug_cpu_ret_count),
 	.debug_trace_bus(debug_cpu_trace_bus),
 	.debug_trace_frozen(debug_cpu_trace_frozen),
@@ -1475,6 +1517,31 @@ assign bist_sdram_read = 1'b0;
 assign bist_sdram_write = 1'b0;
 `endif
 
+wire [15:0] debug_adapter_status;
+reg debug_packed_ready_seen = 1'b0;
+always @(posedge clk_core) begin
+	if (!pll_locked)
+		debug_packed_ready_seen <= 1'b0;
+	else if (debug_adapter_status[12])
+		debug_packed_ready_seen <= 1'b1;
+end
+
+// Hold the SDRAM adapter (clk_core + clk_sdram_ctl) and burst controller
+// (clk_sdram_ctl) in synchronous reset/init for 8 clk_core cycles (= 16
+// clk_sdram_ctl cycles) after pll_locked asserts. Asynchronous clear ensures
+// reset starts even before either PLL clock toggles cleanly, and holding init
+// across post-lock clock edges prevents ki_sdram_x2/ki_sdram_burst from starting
+// with un-reset state if pll_locked rises asynchronously or before clk2x starts.
+(* altera_attribute = "-name SYNCHRONIZER_IDENTIFICATION FORCED_IF_ASYNCHRONOUS" *)
+reg [7:0] sdram_postlock_pipe = 8'd0;
+always @(posedge clk_core or negedge pll_locked) begin
+	if (!pll_locked)
+		sdram_postlock_pipe <= 8'd0;
+	else
+		sdram_postlock_pipe <= {sdram_postlock_pipe[6:0], 1'b1};
+end
+wire sdram_init_reset = ~sdram_postlock_pipe[7];
+
 // ki_sdram_x2 lives inside the adapter and packs the controller's 16-bit beats
 // into the 32 bits clk_core expects. clk_sdram_ctl runs at twice clk_core, so
 // a 32-bit beat comes out every clk_core cycle.
@@ -1482,7 +1549,7 @@ ki_sdram_adapter sdram_adapter
 (
 	.clk(clk_core),
 	.clk2x(clk_sdram_ctl),
-	.reset(~pll_locked),
+	.reset(sdram_init_reset),
 	.request_address(bridge_sdram_address),
 	.request_write_data(bridge_sdram_write_data),
 	.request_byte_enable(bridge_sdram_byte_enable),
@@ -1522,7 +1589,8 @@ ki_sdram_adapter sdram_adapter
 	.controller_ready(controller_sdram_ready),
 	.controller_fast_tog(controller_fast_tog),
 	.controller_fast_addr(controller_fast_addr),
-	.controller_fast_valid(controller_fast_valid)
+	.controller_fast_valid(controller_fast_valid),
+	.debug_status(debug_adapter_status)
 );
 
 // The address decomposition uses col = addr[9:1], so 512 consecutive words
@@ -1537,7 +1605,7 @@ ki_sdram_burst #(
 	.STARTUP_CYCLES(15'd12000), .REFRESH_PERIOD(13'd730)
 ) sdram_controller
 (
-	.init(~pll_locked),
+	.init(sdram_init_reset),
 	.clk(clk_sdram_ctl), .clk_cap(clk_sdram_cap),
 	.SDRAM_DQ(SDRAM_DQ),
 	.SDRAM_A(SDRAM_A),
@@ -1628,7 +1696,7 @@ ki_dcs_audio dcs_audio_board
 	.dbg_valid(),
 	.dbg_unimpl(),
 	.dbg_pcm_push(),
-	.dbg_pc(),
+	.dbg_pc(dcs_dbg_pc),
 	.dbg_pcm_health(dcs_pcm_health),
 	.dbg_pcm_level(dcs_pcm_level)
 );
@@ -1712,10 +1780,35 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
 // and the reboot capture never fired because no reset term asserts after boot
 // (V:0 across two hardware runs). The departure capture answers the question
 // that is still open, so it takes those two rows.
+reg controller_sdram_ready_ctl_seen = 1'b0;
+always @(posedge clk_sdram_ctl) begin
+	if (!pll_locked)
+		controller_sdram_ready_ctl_seen <= 1'b0;
+	else if (controller_sdram_ready)
+		controller_sdram_ready_ctl_seen <= 1'b1;
+end
+
+reg controller_sdram_ready_core_seen = 1'b0;
+always @(posedge clk_core) begin
+	if (!pll_locked)
+		controller_sdram_ready_core_seen <= 1'b0;
+	else if (controller_sdram_ready)
+		controller_sdram_ready_core_seen <= 1'b1;
+end
+
 wire [31:0] debug_loader_summary = {9'd0, debug_loader_info[27:6], 1'b0};
 wire [31:0] debug_boot_summary = {
-	16'd0,
-	boot_state,             // bits 15:13
+	debug_loader_info[31:28],         // bits 31:28 pk_io FSM state
+	debug_download_info[31:28],       // bits 27:24 bridge state[4:1]
+	boot_ready,                       // bit 23
+	buttons[1],                       // bit 22
+	RESET,                            // bit 21
+	shell_reset,                      // bit 20
+	core_reset,                       // bit 19
+	controller_sdram_ready_ctl_seen,  // bit 18
+	controller_sdram_ready_core_seen, // bit 17
+	controller_sdram_ready,           // bit 16
+	boot_state,                       // bits 15:13
 	boot_timed_out,         // bit 12
 	loader_abort,           // bit 11
 	debug_loader_info[0],   // bit 10 aborted
@@ -1754,23 +1847,42 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.cpu_pc(debug_cpu_pc_sync),
 		.cpu_retired(debug_cpu_retired_sync),
 		.cpu_irq_count(debug_cpu_irq_count_sync),
-		.cpu_prev_op(debug_dep_op_hold),
+		.cpu_prev_op(debug_dep_valid_sync ? debug_dep_op_hold : {15'd0, debug_packed_ready_seen, debug_adapter_status}),
 		.cpu_ret_prev(debug_boot_summary),
-		.cpu_eret_flags({16'd0, dcs_host_status}),
+		.cpu_eret_flags({debug_ata_info_sync[31:21], ata_irq, cpu_irq[1], cpu_irq[0], sound_reset, dcs_host_reset, dcs_host_status}),
 		.cpu_ret_count(debug_restart_info),
 		.cpu_ret_pc(debug_loader_summary),
-		.pcm_health(dcs_pcm_health),
+		.pcm_health((dcs_pcm_health[19:0] != 20'd0) ? dcs_pcm_health : {12'd0, 2'b10, 4'd0, dcs_dbg_pc}),
 		// {23 unused, departure valid, 6 unused, 2-bit trigger} - the page reads
 		// bit 8 as V and bits 7:0 as C, so this shows V:1 and C:01 / C:10 once a
 		// departure has been captured, and V:0 before that.
 		.pcm_level({23'd0, debug_dep_valid_sync, 6'd0, debug_dep_trig_hold}),
-		.cpu_response_status(32'd0),
-		// Row 8 shows EX: the COP0 Cause latched with DP/DO.
-		// Latched synchronously on debug_dep_strobe into debug_dep_cause_hold (8 bits)
-		// in clk_core. Bits 6:2 contain ExcCode.
-		.reset_info({24'd0, debug_dep_cause_hold}),
+		// The LIVE ATA word, always - never the departure-capture substitute that
+		// `ata_info` gets above. Row 13 renders three of these bits (irq_pending
+		// and data_index) in its free columns 16-19, so that a capture in progress
+		// can no longer hide the one thing needed to tell "the ATA never raised
+		// its IRQ" from "it did and the CPU never saw it".
+		.cpu_response_status(debug_ata_info_sync),
+		// Row 8 shows EX. With a departure captured (V:1) it is the 8-bit COP0
+		// Cause of that departure; with no departure (V:0) it is the live
+		// interrupt decision set, laid out in the same digit positions so the
+		// two readings can be told apart by V alone:
+		//
+		//   V:1  EX:00000Cxx - the departure Cause; ExcCode in bits 6:2
+		//                    (4 AdEL, 5 AdES, 8 Sys, A RI, 0 Int)
+		//   V:0  EX:IEMM00PP - digit 0 = {irq_ata, irq_vblank, SR.IE, SR.EXL},
+		//                    digit 1 = SR.IM[3:0], digits 4-5 = Cause.IP[7:0]
+		//
+		// "V:0 EX:EF000C00" reads: both IRQ lines asserted, interrupts ENABLED,
+		// not in an exception, IRQs 3 and 2 unmasked and both pending - a real
+		// fault, the CPU should have taken it. "V:0 EX:C0000C00" reads: same
+		// pending bits with IE=0 and IM=0, i.e. the game has not enabled
+		// interrupts yet and is polling, not waiting on an IRQ.
+		.reset_info(debug_dep_valid_sync ? {24'd0, debug_dep_cause_hold} :
+		            {debug_cop0_probe_sync[15:8], 8'd0,
+		             debug_cop0_probe_sync[7:0], 8'd0}),
 		.reset_first(debug_reset_first),
-		.ata_info(debug_dep_pc_hold),
+		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
 		.video_max_v_count(video_max_v_count),
 		.video_vblank_seen(video_vblank_seen),
@@ -1780,6 +1892,11 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.ata_status(debug_ata_status),
 		.ata_error(debug_ata_error),
 		.disk_debug_info(debug_disk_info),
+		// BVA (screen row 9). With a departure captured (V:1) this is the
+		// COP0 BadVAddr of that fault, latched in the same CPU statement as
+		// EX/DP/DO, so the four rows describe one event. With V:0 the screen
+		// ignores it and row 9 stays RF.
+		.badvaddr(debug_dep_valid_sync ? debug_dep_badvaddr_hold : 32'd0),
 		// Page 1 is the frozen pre-event trace. It is fed from the clk_core
 		// shadow, not from the CPU domain directly, so what is on screen is a
 		// coherent capture rather than a live sample of a 736-bit bus.

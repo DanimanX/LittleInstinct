@@ -131,7 +131,7 @@ module ki_sdram_burst #(
   // rise on the same edge: S_READ_DRAIN releases as it captures that word.
   // ki_sdram_adapter turns `ready` into a done a clock later, so its own
   // ports keep the final word strictly before done.
-  output logic        dout_valid,
+  output logic        dout_valid = 1'b0,
   input  wire [255:0] din,       // up to 16 words, low word first
   input  wire         we,
   input  wire         rd,
@@ -402,7 +402,12 @@ module ki_sdram_burst #(
             beats_left <= req_burst;
             beats_out <= req_we ? 5'd0 : req_burst;
             wr_index <= 4'd0;
-            state <= req_we ? S_WRITE : S_READ;
+            // if/else rather than `state <= req_we ? S_WRITE : S_READ`: Icarus
+            // rejects a ternary between two enum literals as needing an explicit
+            // cast, and Quartus accepts it, so the RTL only simulated under
+            // ModelSim. Same logic, both tools agree.
+            if (req_we) state <= S_WRITE;
+            else        state <= S_READ;
             if (HIT_READ && !req_we) begin
               // The first READ now, as S_READ would issue it a clock later;
               // S_READ goes on from the second.
@@ -477,8 +482,12 @@ module ki_sdram_burst #(
       end
 
       S_RCD: begin
-        if (wait_cnt <= 1) state <= req_we ? S_WRITE : S_READ;
-        else wait_cnt <= wait_cnt - 1'b1;
+        if (wait_cnt <= 1) begin
+          if (req_we) state <= S_WRITE;
+          else        state <= S_READ;
+        end else begin
+          wait_cnt <= wait_cnt - 1'b1;
+        end
       end
 
       // Back-to-back column reads inside the open row: one word per clock.

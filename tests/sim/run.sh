@@ -29,6 +29,22 @@ run tb_pk_io_paths \
 	tests/sim/dcfifo_model.sv tests/sim/tb_pk_io_paths.sv \
 	src/fpga/pocket_rtl/pk_io.sv
 
+run tb_disk_batch \
+	tests/sim/dcfifo_model.sv tests/sim/tb_disk_batch.sv \
+	src/fpga/pocket_rtl/pk_io.sv
+
+# Disk data: the halfwords the CPU drains from the ATA data port must be the
+# halfwords in the image. Needs tests/sim/vectors (tools/gen_disk_vectors.py).
+if [ -f tests/sim/vectors/disk_sectors.hex ]; then
+	run tb_disk_data \
+		tests/sim/dcfifo_model.sv tests/sim/tb_disk_data.sv \
+		src/fpga/pocket_rtl/pk_io.sv \
+		upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_board_pkg.sv \
+		upstream/Arcade-KillerInstinct_MiSTer/rtl/ki_ata.sv
+else
+	echo "== tb_disk_data SKIPPED (no tests/sim/vectors; run tools/gen_disk_vectors.py)"
+fi
+
 # Data integrity through the real memory path. -P sweeps the SDRAM model's read
 # latency; see tests/sim/README.md for what this bench does and does not prove.
 run tb_readback \

@@ -177,9 +177,9 @@ module ki_framebuffer (
     green = 8'h00;
     blue  = 8'h00;
     if (pixel_valid) begin
-      red   = {pixel[4:0], pixel[4:2]};
+      red   = {pixel[14:10], pixel[14:12]};
       green = {pixel[9:5], pixel[9:7]};
-      blue  = {pixel[14:10], pixel[14:12]};
+      blue  = {pixel[4:0], pixel[4:2]};
     end
   end
 

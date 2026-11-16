@@ -32,7 +32,7 @@
 // worst slack over the four corners (setup / hold):
 //   1528 ps   +0.31 / -0.01
 //   1667 ps   +0.31 / -0.07      (later is worse for hold)
-//   1389 ps   +0.39 / +0.05      (in use)
+//   1389 ps   +0.38 / +0.05      (in use)
 // The whole eye is only ~0.3 ns wide against upstream's board numbers
 // (6.0 ns max / 2.5 ns min input delay), so re-check both slacks whenever the
 // pin clock phase or the SDRAM pin assignments change.

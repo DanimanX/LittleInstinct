@@ -82,7 +82,9 @@ module ki_sdram_adapter (
   input  wire         controller_ready,
   output wire         controller_fast_tog,
   output wire  [24:0] controller_fast_addr,
-  input  wire         controller_fast_valid
+  input  wire         controller_fast_valid,
+
+  output wire  [15:0] debug_status
 );
   // What the arbitration below launches. ki_sdram_x2 carries these to the
   // controller unchanged and packs the words that come back.
@@ -98,6 +100,8 @@ module ki_sdram_adapter (
   wire        packed_valid;
   wire        packed_ready;
 
+  wire [7:0] x2_debug_status;
+
   ki_sdram_x2 pack (
     .clk(clk), .clk2x(clk2x), .init(reset),
     .req_addr(issue_address), .req_din(issue_write_data),
@@ -109,7 +113,8 @@ module ki_sdram_adapter (
     .ctl_wtbt(controller_byte_enable), .ctl_burst(controller_burst),
     .ctl_rd(controller_read), .ctl_we(controller_write),
     .ctl_dout(controller_read_data), .ctl_dout_valid(controller_dout_valid),
-    .ctl_ready(controller_ready)
+    .ctl_ready(controller_ready),
+    .debug_status(x2_debug_status)
   );
 
   // The direct fill path bypasses the arbitration below: ki_sdram_burst takes
@@ -165,6 +170,18 @@ module ki_sdram_adapter (
   wire aux_starved = (aux_wait >= AUX_STARVE_LIMIT[5:0]);
 
   assign sdram_ready = startup_done;
+  assign debug_status = {
+    state,                  // [15:14]
+    startup_done,           // [13]
+    packed_ready,           // [12]
+    controller_ready,       // [11]
+    reset,                  // [10]
+    x2_debug_status[7:6],   // [9:8] half, rd_d
+    x2_debug_status[4:0],   // [7:3] words_left
+    issue_read,             // [2]
+    controller_dout_valid,  // [1]
+    packed_valid            // [0]
+  };
 
   // A primary request arriving while nothing is queued and the controller is
   // free goes straight out on this clock, rather than being captured into

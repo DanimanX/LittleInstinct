@@ -755,8 +755,8 @@ set_instance_assignment -name ALLOW_SYNCH_CTRL_USAGE OFF -to *|SDRAM_*
 # core_top in core/). Framework: apf/apf.qip.
 # Constraints: apf/apf_constraints.sdc (via apf.qip) reads core/core_constraints.sdc.
 set_global_assignment -name QIP_FILE ki_pocket.qip
-set_global_assignment -name NUM_PARALLEL_PROCESSORS ALL
-set_global_assignment -name SEED 1
+set_global_assignment -name NUM_PARALLEL_PROCESSORS 4
+set_global_assignment -name SEED 9
 
 set_global_assignment -name VERILOG_MACRO "KI_FB_OFFCHIP=1"
 

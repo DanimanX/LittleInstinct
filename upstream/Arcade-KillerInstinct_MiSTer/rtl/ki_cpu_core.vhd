@@ -135,6 +135,9 @@ entity ki_cpu_core is
       debug_dep_valid       : out std_logic := '0';
       debug_dep_trigger     : out std_logic_vector(1 downto 0) := (others => '0');
       debug_exc_cause       : out std_logic_vector(31 downto 0);
+      -- BadVAddr latched with debug_exc_cause; see cpu.vhd's port.
+      debug_badvaddr        : out std_logic_vector(31 downto 0);
+      debug_cop0_cause_live : out std_logic_vector(31 downto 0);
       debug_ret_count       : out std_logic_vector(31 downto 0);
       debug_retire_pc       : out std_logic_vector(31 downto 0);
       debug_retire_opcode   : out std_logic_vector(31 downto 0);
@@ -224,6 +227,7 @@ architecture rtl of ki_cpu_core is
    signal reset_93_pipe  : std_logic_vector(1 downto 0) := (others => '1');
    signal irq_meta       : std_logic_vector(1 downto 0) := (others => '0');
    signal irq_sync       : std_logic_vector(1 downto 0) := (others => '0');
+   signal cop0_cause_live_i : std_logic_vector(31 downto 0) := (others => '0');
    signal pause_meta     : std_logic := '0';
    signal pause_sync     : std_logic := '0';
 
@@ -270,6 +274,7 @@ architecture rtl of ki_cpu_core is
 begin
    mem_address <= std_logic_vector(address_u);
    mem_size    <= std_logic_vector(size_u);
+   debug_cop0_cause_live <= irq_sync & cop0_cause_live_i(29 downto 0);
 
    -- Assert immediately, then release reset independently in each CPU domain.
    process (clk1x, reset)
@@ -368,13 +373,14 @@ begin
          debug_dep_valid       => debug_dep_valid,
          debug_dep_trigger     => debug_dep_trigger,
          debug_exc_cause       => debug_exc_cause,
+         debug_badvaddr        => debug_badvaddr,
          debug_ret_count       => debug_ret_count,
          debug_retire_pc       => debug_retire_pc,
          debug_retire_opcode   => debug_retire_opcode,
          debug_trace_bus         => debug_trace_bus,
          debug_trace_frozen      => debug_trace_frozen,
-         -- Simulation-only taps; the board reads the frozen copies instead.
-         debug_cop0_cause_live   => open,
+         -- Live COP0 Cause (plus irq_sync in bits 31:30 for on-screen IRQ debug).
+         debug_cop0_cause_live   => cop0_cause_live_i,
          debug_cop0_epc_live     => open,
          debug_eret_epc          => debug_eret_epc,
          debug_eret_target       => debug_eret_target,

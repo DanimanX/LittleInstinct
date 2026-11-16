@@ -46,6 +46,9 @@ module ki_debug_screen #(
   input  wire   [7:0] ata_status,
   input  wire   [7:0] ata_error,
   input  wire  [31:0] disk_debug_info,
+  // 32-bit BVA field (Pocket port). Carries the CPU's latched COP0 BadVAddr
+  // while a departure capture is valid, so row 9 reads BVA instead of RF.
+  input  wire  [31:0] badvaddr,
 
   // ---------------------------------------------------------------------
   // Page 1: the frozen pre-event execution trace.
@@ -126,6 +129,7 @@ module ki_debug_screen #(
         ata_status,
         ata_error,
         disk_debug_info,
+        badvaddr,
         boot_state,
         sdram_ready
   });
@@ -164,6 +168,7 @@ module ki_debug_screen #(
         ata_status,
         ata_error,
         disk_debug_info,
+        badvaddr,
         boot_state,
         sdram_ready
       };
@@ -459,6 +464,7 @@ module ki_debug_screen #(
     logic  [7:0] d_ata_status;
     logic  [7:0] d_ata_error;
     logic [31:0] d_disk_debug;
+    logic [31:0] d_badvaddr;
     logic  [2:0] d_boot_state;
     logic        d_sdram_ready;
     begin
@@ -491,6 +497,7 @@ module ki_debug_screen #(
         d_ata_status,
         d_ata_error,
         d_disk_debug,
+        d_badvaddr,
         d_boot_state,
         d_sdram_ready
       } = data;
@@ -505,7 +512,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="6"; 12: screen_char="9";
+          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="9";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -649,19 +656,25 @@ module ki_debug_screen #(
           else if (column == 17)
             screen_char=8'h30+{7'd0, d_cpu_eret_flags[11]};
         end
-        // EX: the COP0 Cause latched at the departure (row 14's DP/DO pair).
-        // This row carried RS, the reset provenance counters, which read
-        // 00000000 on every run because nothing resets the core after boot.
+        // EX: with a departure captured (V:1) this is the COP0 Cause latched
+        // with DP/DO; with none (V:0) it is the LIVE interrupt decision set.
+        // V tells the two apart, and they do not share a format:
         //
-        // ExcCode is bits 6:2, so read the value as a word and shift:
-        //   00000004 AdEL (bad load address)   00000028 RI  (reserved instr.)
-        //   00000014 AdES (bad store address)  00000020 Sys (system call)
-        //   00000000 Int  (interrupt)          0000001C/2C/30/34 TLB faults
+        //   V:1  EX:000000xx  ExcCode of the departure, bits 6:2
+        //                     (4 AdEL, 5 AdES, 8 Sys, A RI, 0 Int)
+        //   V:0  EX:IEMM00PP  digit 0 = {irq_ata, irq_vblank, SR.IE, SR.EXL}
+        //                     digit 1 = SR.IM[3:0] (bit 3 ATA, bit 2 vblank)
+        //                     digits 4-5 = Cause.IP[7:0] (bit 3 ATA, bit 2 vblank)
         //
-        // RI is the interesting one here: a reserved instruction at DP means the
-        // core either executed code it should not have or decoded a word it
-        // fetched wrongly, and either way the exception handler sends control to
-        // the boot ROM - which is exactly what DP/V/C report.
+        // Read V:0 as a decision, in this order:
+        //   IP set and IE=0        the CPU is not allowed to take it yet
+        //   IP set, IE=1, IM bit 0 the source is masked by SR.IM
+        //   IP set, IE=1, IM bit 1 that source is enabled and NOT being taken,
+        //                          which is a fault in the interrupt path, not
+        //                          in the game
+        //
+        // Before v1.0.26 only the IP half was on screen, which made "masked"
+        // and "stuck" indistinguishable - the two readings that matter.
         8: begin
           if (column == 0) screen_char="E";
           else if (column == 1) screen_char="X";
@@ -689,11 +702,23 @@ module ki_debug_screen #(
         // RF:00000001 means nothing reset the core except the operator and the
         // ROM load - and then the restart is NOT a reset after all.
         9: begin
-          if (column == 0) screen_char="R";
-          else if (column == 1) screen_char="F";
-          else if (column == 2) screen_char=":";
+          // BVA: COP0 BadVAddr latched by the SAME CPU statement that latches
+          // EX and DP/DO, so with V:1 (row 14) the four rows read as one
+          // event: DP/DO = the instruction, EX = its ExcCode, BVA = the
+          // address it faulted on. Bit 31 is the kseg validity of that
+          // address (1 = a real 0x8xxxxxxx-style kernel address), so
+          // BVA:00000000 under EX:...0C04 (AdEL) means the fault address was
+          // captured as zero, not that 0 is a valid code address.
+          //
+          // With V:0 there is no departure and this row is RF again: the
+          // first spontaneous reset, which BVA cannot describe.
+          if (column == 0) screen_char = d_pcm_level[8] ? "B" : "R";
+          else if (column == 1) screen_char = d_pcm_level[8] ? "V" : "F";
+          else if (column == 2) screen_char = d_pcm_level[8] ? "A" : ":";
           else if (column >= 3 && column <= 10)
-            screen_char=hex32_ascii(d_reset_first, column-3);
+            screen_char = hex32_ascii(d_pcm_level[8] ? d_badvaddr
+                                                     : d_reset_first,
+                                      column-3);
         end
         10: begin
           // DO: the opcode ONE DECODE BEFORE the last PC in the program, which
@@ -707,12 +732,14 @@ module ki_debug_screen #(
           //   Anything else is the instruction preceding the faulting one, so
           //   read DP as the last instruction that got to run.
           //
-          // This row carried the loader's download FSM (DL) until v1.0.14. The
-          // loader is settled (RX:00480000, BOOT:1 on every run since
-          // v1.0.10), and the boot supervisor on row 11 already reports loader
-          // state, timeout and abort.
-          if (column == 0) screen_char="D";
-          else if (column == 1) screen_char="O";
+          // With NO departure captured (V:0) this row is not an opcode at all:
+          // it is the SDRAM adapter's live status, {15'd0, packed_ready_seen,
+          // adapter_status[15:0]}, and its label changes to AS for that reason.
+          // See the adapter's debug_status for the bit legend; the two bits
+          // worth knowing here are startup_done (bit 13 of the low half) and the
+          // 2-bit FSM state (bits 15:14).
+          if (column == 0) screen_char = d_pcm_level[8] ? "D" : "A";
+          else if (column == 1) screen_char = d_pcm_level[8] ? "O" : "S";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_prev_op, column-3);
@@ -785,6 +812,41 @@ module ki_debug_screen #(
           11: screen_char="E"; 12: screen_char="R"; 13: screen_char=":";
           14: screen_char=hex_ascii(d_ata_error[7:4]);
           15: screen_char=hex_ascii(d_ata_error[3:0]);
+          // Columns 16-19 were free, and with a departure captured (V:1) rows 10
+          // and 14 stop showing the ATA at all - they hold DP/DO instead. The
+          // live word arrives on cpu_response_status, which used to be a tied-off
+          // constant:
+          //
+          //   column 16      bits 23:20 = {irq, irq_pending, nIEN, unused}
+          //   columns 17-18  data_index, 8 bits, progress through the sector
+          //
+          // The nibble is the whole point of the field. It is NOT four
+          // independent bits: ki_ata.sv:174 drives `irq = irq_pending &&
+          // !nIEN`, so bit 23 can never be set while bit 21 is. That leaves
+          // exactly four reachable values, and reading them as hex:
+          //
+          //   0  = 0000  nothing pending, nothing masked - idle, the normal value
+          //   2  = 0010  nIEN set with nothing pending - interrupts are MASKED
+          //              at the drive and there is no reason to raise one
+          //   6  = 0110  irq_pending set AND nIEN set - the drive has data
+          //              waiting and is holding its own line low. Cause.IP[3]
+          //              stays 0, so a poll loop never exits. This is the
+          //              masked case, and it is what makes a live drive look dead.
+          //   C  = 1100  irq up, irq_pending set, nIEN clear - the CPU can see
+          //              it. If the game is still stuck on 6 vs C, the fault is
+          //              downstream in the COP0 interrupt path, not here.
+          //
+          // E (1110) is unreachable and must never be documented as "masked":
+          // nIEN high forces irq low, which is 6. An earlier revision of this
+          // comment said E, and that was wrong by one bit.
+          //
+          // An even earlier cut rendered bit 22 alone plus two data_index bits
+          // taken from the wrong lanes ([15:12] and [11:8] instead of [19:16]
+          // and [15:12]); a reading of "P100" meant irq_pending=1 with
+          // data_index not actually shown at all.
+          16: screen_char=hex_ascii(d_cpu_response_status[23:20]);
+          17: screen_char=hex_ascii(d_cpu_response_status[19:16]);
+          18: screen_char=hex_ascii(d_cpu_response_status[15:12]);
           default: screen_char=" ";
         endcase
         // AC packs, left to right:
@@ -799,12 +861,25 @@ module ki_debug_screen #(
         // DP/V/C: the departure capture, which replaced the reboot capture in
         // v1.0.14.
         //
-        //   DP  the last address executed in the decompressed program (0x88xxxxxx)
-        //       before control left it - the delay slot of the branch in DO,
-        //       when the exit was a branch
         //   V   whether a departure was captured at all (read this FIRST)
-        //   C   01 = control went to the boot ROM, 10 = it dropped straight back
-        //       to 0x88000000 with no boot ROM in between
+        //
+        //   V:1  DP  the last address executed in the decompressed program
+        //            (0x88xxxxxx) before control left it - the delay slot of
+        //            the branch in DO, when the exit was a branch
+        //        C   01 = control went to the boot ROM, 10 = it dropped
+        //            straight back to 0x88000000 with no boot ROM in between
+        //        DO  (row 10) the opcode at DP
+        //
+        //   V:0  AI  NOT an address. The ATA controller's live debug word
+        //            {last_command, irq, irq_pending, nIEN, 0, data_index,
+        //            data_writes} - last disk command in digits 0-1, a stuck
+        //            ATA IRQ in digit 2.
+        //        AS  (row 10) the SDRAM adapter's live status.
+        //        C   00, always: there was no departure to classify.
+        //
+        // The labels change with V so that AI/AS cannot be read as an address
+        // and an opcode. They were, in a session that recorded "DP:91C00000"
+        // as a program counter; 0x91 is a disk command, not code.
         //
         // The old row latched the PC and reset-cause mask on the rising edge of
         // cpu_reset, and two hardware runs read V:0 from it: no reset term ever
@@ -825,8 +900,15 @@ module ki_debug_screen #(
         14: begin
           // The delay-slot relationship between DP and DO, and the validity
           // caveat, are in the block comment above.
-          if (column == 0) screen_char="D";
-          else if (column == 1) screen_char="P";
+          //
+          // V is read before the digits, always. With V:0 this row is NOT a
+          // program counter: it is the ATA controller's live debug word
+          // {last_command, irq, irq_pending, nIEN, 0, data_index, data_writes},
+          // which is where the last disk command and a stuck ATA IRQ can be
+          // read from. The label says AI instead of DP in that case so the
+          // digits cannot be mistaken for an address - they were, once.
+          if (column == 0) screen_char = d_pcm_level[8] ? "D" : "A";
+          else if (column == 1) screen_char = d_pcm_level[8] ? "P" : "I";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_ata_info, column-3);
@@ -878,7 +960,7 @@ module ki_debug_screen #(
           0: trace_char="K"; 1: trace_char="I";
           3: trace_char="T"; 4: trace_char="R"; 5: trace_char="A";
           6: trace_char="C"; 7: trace_char="E";
-          9: trace_char="V"; 10: trace_char="1"; 11: trace_char="6";
+          9: trace_char="V"; 10: trace_char="1"; 11: trace_char="7";
           12: trace_char="9";
           default: trace_char=" ";
         endcase

@@ -114,6 +114,12 @@ module pk_io #(
 	localparam [63:0]  DEFAULT_KI1_SIZE = 64'd131076608;
 	localparam [63:0]  DEFAULT_KI2_SIZE = 64'd457673216;
 
+	// Declared here instead of next to its driver (~line 618): the main FSM reads
+	// it 300 lines earlier, and Questa rejects a module-scope net whose
+	// declaration follows its first use (vlog-2730). Quartus accepts either
+	// order, so this is a portability fix for the benches, not a logic change.
+	wire core_menu_reset;
+
 	// ---------------------------------------------------------------- clk_74a
 	// ROM slot writes: [0, ROM_BYTES).
 	// Disk sector writes: [DISK_BRIDGE_BASE, DISK_BRIDGE_BASE + 16 KiB).
@@ -466,8 +472,28 @@ module pk_io #(
 					fifo_rd <= 1'b1;
 					st      <= S_DISK_RD;
 				end else if (disk_active &&
-				             ((disk_done_sync[2] == disk_req_tog) ||
+				             (((disk_done_sync[2] == disk_req_tog) &&
+				               (disk_words_rem == 13'd0)) ||
 				              disk_watchdog[DISK_TIMEOUT_BIT])) begin
+					// A bank is only complete when EVERY halfword of the batch has
+					// arrived, so the close is gated on the count and not on `done`
+					// alone. `done` is an APF LEVEL, not an acknowledgement: tcmd_st==2'd2
+					// (line 246) fires on a level left over from the previous transfer,
+					// or on tcmd_timeout[23] (113 ms at 74.25 MHz), and neither case can
+					// be told apart from a real completion here. ki_ata then marks the
+					// WHOLE batch valid from bank_count alone (ki_ata.sv:497) and hands
+					// the CPU sectors that were never written.
+					//
+					// Measured on hardware, between transfers (disk_active=0, sd_ack=0):
+					// disk_words_rem read 482 and 1056 on two sightings - 6.12 and 3.88
+					// sectors of 8, cut mid-sector and at different points. A timing
+					// cut, not an accounting error, and it is what made the game's own
+					// LBA 1 against LBA 255919 comparison at 8801DEAC fail with
+					// "CHECK SUM SECTORS CORRUPTED".
+					//
+					// The disk-write path loads disk_words_rem with 0 (line 363), so
+					// the guard is already satisfied there and writes close as before.
+					//
 					// Sticky: a timeout here means the APF stopped answering, and
 					// ki_ata will have accepted a partial bank as complete. Surface
 					// it on the debug page instead of letting it look like a game bug.
@@ -594,7 +620,7 @@ module pk_io #(
 			reset_extender <= reset_extender - 18'd1;
 		end
 	end
-	wire core_menu_reset = (reset_extender != 18'd0);
+	assign core_menu_reset = (reset_extender != 18'd0);
 
 	assign buttons = {core_menu_reset, ~apf_reset_n};   // [1] = reset, [0] = apf_reset
 

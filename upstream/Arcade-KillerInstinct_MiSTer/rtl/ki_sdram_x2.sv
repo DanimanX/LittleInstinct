@@ -68,7 +68,8 @@ module ki_sdram_x2 (
   output wire         ctl_we,
   input  wire  [15:0] ctl_dout,
   input  wire         ctl_dout_valid,
-  input  wire         ctl_ready
+  input  wire         ctl_ready,
+  output wire   [7:0] debug_status
 );
   // Slow to fast: straight through. See the header.
   assign ctl_addr  = req_addr;
@@ -136,6 +137,7 @@ module ki_sdram_x2 (
   // becomes the data cache's ram_done, so it lands straight on F3 of every
   // miss.
   assign req_ready = ctl_ready && (words_left == 5'd0) && !half;
+  assign debug_status = {half, rd_d, hold, words_left};
 
   always_ff @(posedge clk2x) begin
     rd_d <= ctl_rd;

@@ -20,6 +20,11 @@ references/
 roms/*
 !roms/README.md
 *.7z
+
+# Simulation vectors: bytes taken from the game's own disk image and sound
+# ROM, same rule as roms/. Regenerate with tools/gen_disk_vectors.py and
+# tools/gen_dcs_rom_hex.py.
+tests/sim/vectors/
 src/fpga/c5_pin_model_dump.txt
 src/seed*/
 *.log

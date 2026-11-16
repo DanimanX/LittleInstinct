@@ -482,7 +482,7 @@ module ki_memory_bridge #(
   // Set to 0 to disable gathering without removing it (the eligibility test
   // folds to a constant), which is the first thing to try if hardware
   // misbehaves.
-  localparam logic WB_GATHER = 1'b1;
+  localparam logic WB_GATHER = 1'b0;
 
   logic   [2:0] wb_count = 3'd0;     // 64-bit chunks held, 0..4
   logic  [24:0] wb_addr = 25'd0;     // word address of the first chunk
@@ -1099,8 +1099,11 @@ module ki_memory_bridge #(
               read_buffer <= 64'd0;
               read_word_index <= 2'd0;
               read_words_remaining <= active_read_words;
-              line_read <= active_req64 && (active_read_words == 5'd16) &&
-                           (active_first_word[3:0] == 4'd0);
+              // Do not raise cpu_done early on the one-but-last beat; doing so
+              // clears datacache_active/ram_active in cpu_pocket before the 4th beat
+              // is written into the D-cache RAM, causing beat 4 (bytes 24..31) to be
+              // dropped on line fills. Every burst finishes cleanly on read_words_left_next == 0.
+              line_read <= 1'b0;
               fill_beat <= 2'd0;
               // Framebuffer access routed to SDRAM
               if (cpu_hits_fb) begin
@@ -1154,8 +1157,11 @@ module ki_memory_bridge #(
                 // it, so the next 31 byte reads of that line cost nothing on
                 // the SDRAM bus.
                 cpu_grant <= 1'b1;
-                boot_rom_return_state <=
-                    rom_line_hit ? ROM_LINE_RETURN : ROM_LINE_FILL_ISSUE;
+                // if/else rather than a ternary between the two enum literals:
+                // Icarus demands an explicit cast for that shape and Quartus
+                // does not, which kept this file out of the simulation suite.
+                if (rom_line_hit) boot_rom_return_state <= ROM_LINE_RETURN;
+                else              boot_rom_return_state <= ROM_LINE_FILL_ISSUE;
                 boot_rom_wait_cycles <=
                     {active_read_words, {BOOT_ROM_WAIT_SHIFT{1'b0}}};
                 state <= BOOT_ROM_ACCESS_WAIT;
