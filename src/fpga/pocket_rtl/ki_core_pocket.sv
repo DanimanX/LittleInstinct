@@ -1522,71 +1522,20 @@ ki_sdram_bist #(.WORDS(256)) sdram_bist
 	.first_bad_actual(bist_first_bad_actual)
 );
 `else
-// Tiny 4-word SDRAM probe targeting Main RAM 0x0808_7000 (word 25'h00C3800)
-// to test silicon read/write integrity at the failing stack region.
-reg [1:0]  probe_state = 2'd0;
-reg        probe_busy = 1'b0;
-reg        probe_done = 1'b0;
-reg        probe_pass = 1'b0;
-reg        probe_wr = 1'b0;
-reg        probe_rd = 1'b0;
-reg        probe_got_lo = 1'b0;
-reg [31:0] probe_lo = 32'd0;
-reg [15:0] probe_bad_actual = 16'd0;
-
-always @(posedge clk_core) begin
-	probe_wr <= 1'b0;
-	probe_rd <= 1'b0;
-	if (shell_reset) begin
-		probe_state <= 2'd0;
-		probe_busy <= 1'b0;
-		probe_done <= 1'b0;
-		probe_pass <= 1'b0;
-		probe_got_lo <= 1'b0;
-		probe_lo <= 32'd0;
-		probe_bad_actual <= 16'd0;
-	end else begin
-		case (probe_state)
-			2'd0: if (sdram_ready && boot_loaded && !probe_done) begin
-				probe_busy <= 1'b1;
-				probe_wr <= 1'b1;
-				probe_state <= 2'd1;
-			end
-			2'd1: if (bist_sdram_done) begin
-				probe_rd <= 1'b1;
-				probe_got_lo <= 1'b0;
-				probe_state <= 2'd2;
-			end
-			2'd2: begin
-				if (bist_sdram_data_valid && !probe_got_lo) begin
-					probe_lo <= bist_sdram_read_data;
-					probe_got_lo <= 1'b1;
-				end
-				if (bist_sdram_done) begin
-					probe_pass <= probe_got_lo && (probe_lo == 32'h1234_5678);
-					probe_bad_actual <= probe_lo[15:0];
-					probe_busy <= 1'b0;
-					probe_done <= 1'b1;
-					probe_state <= 2'd3;
-				end
-			end
-			default: ;
-		endcase
-	end
-end
-
-assign bist_busy = probe_busy;
-assign bist_done = probe_done;
-assign bist_pass = probe_pass;
-assign bist_error_count = probe_pass ? 16'd0 : 16'd1;
-assign bist_first_bad_expected = 16'h5678;
-assign bist_first_bad_actual = probe_bad_actual;
-assign bist_sdram_address = 25'h00C3800;
-assign bist_sdram_write_data = 64'hCAFE_BABE_1234_5678;
-assign bist_sdram_byte_enable = 8'hff;
-assign bist_sdram_burst = 5'd4;
-assign bist_sdram_read = probe_rd;
-assign bist_sdram_write = probe_wr;
+// No self test: the CPU starts as soon as the ROM is loaded and the SDRAM is
+// ready, and the adapter's auxiliary port stays idle.
+assign bist_busy = 1'b0;
+assign bist_done = 1'b1;
+assign bist_pass = 1'b1;
+assign bist_error_count = 16'd0;
+assign bist_first_bad_expected = 16'd0;
+assign bist_first_bad_actual = 16'd0;
+assign bist_sdram_address = 25'd0;
+assign bist_sdram_write_data = 64'd0;
+assign bist_sdram_byte_enable = 8'd0;
+assign bist_sdram_burst = 5'd0;
+assign bist_sdram_read = 1'b0;
+assign bist_sdram_write = 1'b0;
 `endif
 
 wire [15:0] debug_adapter_status;
