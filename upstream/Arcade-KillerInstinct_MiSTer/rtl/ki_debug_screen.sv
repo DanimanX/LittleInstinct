@@ -24,6 +24,54 @@ module ki_debug_screen #(
   input  wire  [31:0] cpu_response_status,
   input  wire  [31:0] reset_info,
   input  wire  [31:0] reset_first,
+  // BR (row 9 under V:0): the memory side of a CPU stall, one word. Built in
+  // ki_core_pocket.sv from the bridge's debug_cpu_wait_info and the data
+  // cache's FSM state:
+  //
+  //   [31:27] bridge FSM, per the state_t enum in
+  //           ki_memory_bridge_pocket.sv (see row 9's comment for the table)
+  //   [26:24] D-cache FSM bits [2:0] - 0 IDLE, 2 FILL, 3 READWAIT, ...
+  //   [23:16] times the bridge's starvation guard put the CPU first
+  //   [15:0]  worst CPU request age in clk_core cycles since reset
+  input  wire  [31:0] bridge_info,
+  // BQ (row 5, once BOOT:1): the bridge's own view of its adapter link.
+  //   [31:24] sdram_read bursts issued     [23:16] beats in SDRAM_READ_WAIT
+  //   [15:8]  sdram_done pulses (any state)
+  //   [7] done_owed  [6] a done was seen during THIS read
+  //   [5] sdram_ready live  [4:0] read_words_remaining live
+  input  wire  [31:0] bridge_counts,
+  // AD (row 12): the same link from the adapter's side.
+  //   [31:24] cycles with a primary request high
+  //   [23:16] primary launches (FSM left IDLE for owner=0)
+  //   [15:8]  request_done pulses     [7:0] data beats handed over
+  // A healthy 16-word line fill is 1 launch, 8 beats, 1 done.
+  input  wire  [31:0] adapter_counts,
+  // V184 stack-slot probe. S0 (row 10, columns 12-19) is the value the game's
+  // `lw t6,0x30(sp)` at 0x8802EC44 delivered. S1 (row 12, columns 12-19) is
+  // the D-cache evidence for that load:
+  //   [31:12] physical line of the most recent REFILL of the slot's index
+  //   [11] hit  [10] miss  [9] loaded != stored  [8] the store was captured
+  //   [7:0]  interrupts + exception entries taken between store and load
+  input  wire  [31:0] stack_probe0,
+  input  wire  [31:0] stack_probe1,
+  // V185, same watched store->load pair: S2 = the value stored, S3 = the
+  // slot's physical address, S4 = the word the refill delivered at the slot's
+  // qword, and a flag byte:
+  //   [7] a refill of the slot's index happened between store and load
+  //   [6] ... and it asked for the slot's OWN line
+  //   [5] the write-through store was issued to the bridge
+  //   [4] ... carrying the stored value (0x0F byte mask)
+  //   [3:0] other stores to the same line in between
+  input  wire  [31:0] stack_probe2,
+  input  wire  [31:0] stack_probe3,
+  input  wire  [31:0] stack_probe4,
+  input  wire  [11:0] stack_flags,
+  // V186: the array watchpoint. `array_addr`/`array_data` are the last store
+  // that landed inside the caller's 3-entry pointer array, and the flags gain
+  // three bits ([11] armed, [10] a store hit the array, [9] its value differs
+  // from the setup value, [8] odd).
+  input  wire  [31:0] array_addr,
+  input  wire  [31:0] array_data,
   input  wire  [31:0] cpu_prev_op,
   // Flags for the EE/EX/ET group on the status page:
   //   31:16  eret count, saturating
@@ -112,6 +160,17 @@ module ki_debug_screen #(
         cpu_response_status,
         reset_info,
         reset_first,
+        bridge_info,
+        bridge_counts,
+        adapter_counts,
+        stack_probe0,
+        stack_probe1,
+        stack_probe2,
+        stack_probe3,
+        stack_probe4,
+        stack_flags,
+        array_addr,
+        array_data,
         cpu_prev_op,
         cpu_ret_prev,
         cpu_eret_flags,
@@ -151,6 +210,17 @@ module ki_debug_screen #(
         cpu_response_status,
         reset_info,
         reset_first,
+        bridge_info,
+        bridge_counts,
+        adapter_counts,
+        stack_probe0,
+        stack_probe1,
+        stack_probe2,
+        stack_probe3,
+        stack_probe4,
+        stack_flags,
+        array_addr,
+        array_data,
         cpu_prev_op,
         cpu_ret_prev,
         cpu_eret_flags,
@@ -447,6 +517,17 @@ module ki_debug_screen #(
     logic [31:0] d_cpu_response_status;
     logic [31:0] d_reset_info;
     logic [31:0] d_reset_first;
+    logic [31:0] d_bridge_info;
+    logic [31:0] d_bridge_counts;
+    logic [31:0] d_adapter_counts;
+    logic [31:0] d_stack_probe0;
+    logic [31:0] d_stack_probe1;
+    logic [31:0] d_stack_probe2;
+    logic [31:0] d_stack_probe3;
+    logic [31:0] d_stack_probe4;
+    logic [11:0] d_stack_flags;
+    logic [31:0] d_array_addr;
+    logic [31:0] d_array_data;
     logic [31:0] d_cpu_prev_op;
     logic [31:0] d_cpu_ret_prev;
     logic [31:0] d_cpu_eret_flags;
@@ -480,6 +561,17 @@ module ki_debug_screen #(
         d_cpu_response_status,
         d_reset_info,
         d_reset_first,
+        d_bridge_info,
+        d_bridge_counts,
+        d_adapter_counts,
+        d_stack_probe0,
+        d_stack_probe1,
+        d_stack_probe2,
+        d_stack_probe3,
+        d_stack_probe4,
+        d_stack_flags,
+        d_array_addr,
+        d_array_data,
         d_cpu_prev_op,
         d_cpu_ret_prev,
         d_cpu_eret_flags,
@@ -512,7 +604,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="7"; 12: screen_char="9";
+          10: screen_char="1"; 11: screen_char="8"; 12: screen_char="6";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -570,12 +662,23 @@ module ki_debug_screen #(
         5: begin
           // RX: bytes handed to the ROM loader (pk_io's wr_addr). 0x480000 is
           // a complete image; anything less when BOOT is still 0 is the size
-          // the loader actually received.
-          if (column == 0) screen_char="R";
-          else if (column == 1) screen_char="X";
+          // the loader actually received. Once BOOT:1 the loader is done with
+          // the row, so from v181 it becomes BQ: the bridge's half of the
+          // adapter link - the field that explains a bridge parked in
+          // SDRAM_READ_WAIT. DK, the disk word, is unchanged either way.
+          //
+          // Reading BQ beside AD (row 12): compare BQ[31:24] against AD[31:24]
+          // for the request crossing, BQ[23:16] against AD[7:0] for the beats,
+          // and BQ[15:8] against AD[15:8] for the completion. The first pair
+          // that disagrees is the link that lost the traffic. BQ[7] set with
+          // BQ[6] clear is the specific disease where every done is being
+          // swallowed as an already-owed one.
+          if (column == 0) screen_char = d_boot_loaded ? "B" : "R";
+          else if (column == 1) screen_char = d_boot_loaded ? "Q" : "X";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
-            screen_char=hex32_ascii(d_cpu_ret_pc, column-3);
+            screen_char = hex32_ascii(d_boot_loaded ? d_bridge_counts
+                                                    : d_cpu_ret_pc, column-3);
           else if (column == 11) screen_char="D";
           else if (column == 12) screen_char="K";
           else if (column == 13) screen_char=":";
@@ -608,6 +711,27 @@ module ki_debug_screen #(
             else if (column >= 11 && column <= 14)
               screen_char=hex32_ascii({16'd0, d_bist_first_bad_actual},
                                       column-7);
+          end else if (d_boot_loaded) begin
+            // V185: once the ROM is in, the BIST row is long finished and the
+            // retired count is on row 10. S2 and S4 of the watched store->load
+            // pair go here: S2:aaaaaaaabbbbbbbb - the value STORED (S2) and the
+            // word the refill delivered at the slot's qword (S4). If they agree
+            // and S0 (row 10) does not, the load itself is at fault; if S2 and
+            // S4 disagree, the write-through store did not reach SDRAM before
+            // the refill read it back.
+            if (column == 0) screen_char="S";
+            else if (column == 1) screen_char="2";
+            else if (column == 2) screen_char=":";
+            else if (column >= 3 && column <= 10)
+              screen_char=hex32_ascii(d_stack_probe2, column-3);
+            // V186: this tail is now the DATA of the last store that landed
+            // inside the caller's pointer array. S4 was dropped: it captured
+            // whichever line shared the index and was already documented as
+            // unreliable. If this equals the garbage pointer the fault used,
+            // the overwrite is caught; if it equals the setup value
+            // (0x88500000), nothing overwrote and the fault is elsewhere.
+            else if (column >= 12 && column <= 19)
+              screen_char=hex32_ascii(d_array_data, column-12);
           end else begin
             if (column == 0) screen_char="N";
             else if (column == 1) screen_char=":";
@@ -681,6 +805,10 @@ module ki_debug_screen #(
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_reset_info, column-3);
+          // V186: the ADDRESS of that last array store. Address - 4 is the
+          // array base, so two neighbouring slots name which entry was hit.
+          else if (column >= 12 && column <= 19)
+            screen_char=hex32_ascii(d_array_addr, column-12);
         end
         // DP: the last address executed in RAM before control left it.
         // DO: the opcode at THAT address (same decode, see cpu_pocket.vhd).
@@ -689,18 +817,72 @@ module ki_debug_screen #(
         // purpose; a load/store with a bad address, or a word that is not a
         // legal MIPS III instruction, is a fault - and EX (row 8) says which.
         //
-        // RF isolates the first reset the operator did NOT cause, which the
-        // sticky mask in RS cannot do - every test run contains one deliberate
-        // OSD reset and RS ORs it in permanently.
+        // BR replaces the old RF row under V:0, as of V180. RF showed the
+        // first reset the operator did NOT cause (cause mask, PLL unlock
+        // count, late resets, ROM downloads); it is no longer on the page,
+        // because the question this row now has to answer is the one that
+        // stopped the first v1.1.0 board: WHICH SIDE of the CPU-to-SDRAM
+        // handshake is stuck. RF said a reset had happened; it could not say
+        // where the machine was when it stopped.
         //
-        //   digits 0-3 cause mask of that first spontaneous reset alone
-        //   digits 4-5 PLL unlock count, taken in the 50 MHz reference domain
-        //              so it survives the PLL it is watching
-        //   digit  6   spontaneous late resets, saturating at F
-        //   digit  7   ROM/ioctl downloads, which also reset everything
+        // BR:SSDCAAAA - eight hex digits, most significant first:
         //
-        // RF:00000001 means nothing reset the core except the operator and the
-        // ROM load - and then the restart is NOT a reset after all.
+        //   digit 7 (bits 31:28)  bridge FSM, states 0-15
+        //   digit 6 (bits 27:24)  {bridge state[4], D-cache state[2:0]}: bit 3
+        //                         of the digit is bridge state bit 4, so a
+        //                         digit 6 of 0-7 means the bridge is below 16
+        //                         and 8-F means it is at 16 or above (the
+        //                         download, ROM-line, ROM-access, DCS and video
+        //                         states). The low three bits are the cache.
+        //   digits 5-4 (23:16)    how many times the bridge's starvation guard
+        //                         put the CPU ahead of video/DCS
+        //   digits 3-0 (15:0)     the WORST age a CPU request reached since
+        //                         reset, in clk_core cycles (50 MHz). This is a
+        //                         maximum, not the live age, so the number
+        //                         survives the thing it describes.
+        //
+        // The D-cache state is its own FSM (cpu_datacache.vhd's tState'pos):
+        //   0 IDLE        1 CLEARCACHE   2 FILL        3 READWAIT
+        //   4 WAITSLOW    5 WRITEBACK1ADDR 6 WRITEBACK1READ 7 WRITEBACK1WRITE
+        // Only 0, 2 and 3 matter here. Bits [4:3] of it are dropped: the row
+        // has no fourth free nibble.
+        //
+        // The bridge state is state_t in ki_memory_bridge_pocket.sv, 26 states:
+        //
+        //    0 IDLE                   13 FB_READ_WAIT
+        //    1 BOOT_CACHE_READ_WAIT   14 FB_WRITE
+        //    2 BOOT_CACHE_READ_RETURN 15 FB_LINE_WRITE
+        //    3 SDRAM_READ_ISSUE       16 DOWNLOAD_SDRAM_WRITE_ISSUE
+        //    4 SDRAM_READ_WAIT        17 DOWNLOAD_SDRAM_WRITE_WAIT
+        //    5 SDRAM_WRITE_ISSUE      18 ROM_LINE_FILL_ISSUE
+        //    6 SDRAM_WRITE_WAIT       19 ROM_LINE_FILL_WAIT
+        //    7 SDRAM_WRITE_RMW_WAIT   20 ROM_LINE_RETURN
+        //    8 SDRAM_WRITE_RMW_ISSUE  21 BOOT_ROM_ACCESS_WAIT
+        //    9 SDRAM_WB_FLUSH_ISSUE   22 DCS_ROM_READ_ISSUE
+        //   10 SDRAM_WB_FLUSH_WAIT    23 DCS_ROM_READ_WAIT
+        //   11 IO_WAIT                24 VID_ISSUE
+        //   12 FB_READ_ISSUE          25 VID_WAIT
+        //
+        // Reading a hang, cache first:
+        //   cache 2 (FILL), bridge 4  the fill is out and the bridge is waiting
+        //                             for SDRAM beats: the memory path, not the
+        //                             handshake. Check AS (row 10) and SD (row 1).
+        //   cache 2 (FILL), bridge 0  the cache is in FILL and the bridge is
+        //                             idle: the request never reached it, or its
+        //                             answer never came back. The age digits say
+        //                             how long; the guard count says whether
+        //                             arbitration was ever the reason.
+        //   cache 0 (IDLE), bridge 0  the CPU is stalled somewhere that is not
+        //                             the data cache - read RS/BOOT/SD instead.
+        //   cache 2 (FILL), bridge 22/23 or 24/25 with a large age
+        //                             video or the sound board held the port: the
+        //                             exact case the starvation guard exists for.
+        //                             If the guard count is 0, the guard never
+        //                             ran and the build predates V180.
+        //
+        // A clean boot reads BR:?0 00 00xx: the bridge idles or works the boot
+        // ROM, the guard may never have fired, and the worst age is the latency
+        // of one SDRAM line fill in cycles.
         9: begin
           // BVA: COP0 BadVAddr latched by the SAME CPU statement that latches
           // EX and DP/DO, so with V:1 (row 14) the four rows read as one
@@ -712,12 +894,12 @@ module ki_debug_screen #(
           //
           // With V:0 there is no departure and this row is RF again: the
           // first spontaneous reset, which BVA cannot describe.
-          if (column == 0) screen_char = d_pcm_level[8] ? "B" : "R";
-          else if (column == 1) screen_char = d_pcm_level[8] ? "V" : "F";
-          else if (column == 2) screen_char = d_pcm_level[8] ? "A" : ":";
+          if (column == 0) screen_char = "B";
+          else if (column == 1) screen_char = d_pcm_level[8] ? "V" : "R";
+          else if (column == 2) screen_char = ":";
           else if (column >= 3 && column <= 10)
             screen_char = hex32_ascii(d_pcm_level[8] ? d_badvaddr
-                                                     : d_reset_first,
+                                                     : d_bridge_info,
                                       column-3);
         end
         10: begin
@@ -743,6 +925,12 @@ module ki_debug_screen #(
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_cpu_prev_op, column-3);
+          // V184 S0: the value `lw t6,0x30(sp)` at 0x8802EC44 delivered. On the
+          // V183 board this was a garbage pointer and the next instruction took
+          // an AdEL; a sane value here means the stack slot was read correctly
+          // and the fault is downstream.
+          else if (column >= 12 && column <= 19)
+            screen_char=hex32_ascii(d_stack_probe0, column-12);
         end
         // The Pocket port repurposes this row: ET carried the eret target on
         // MiSTer, but the Pocket build has no eret capture wired, so BF shows
@@ -764,6 +952,25 @@ module ki_debug_screen #(
           //   bit 12 watchdog timed out
           //   bits 15-13 boot_state (0 wait PLL, 1 wait SDRAM, 2 loading,
           //              3 ready, 4 timeout)
+          // V185: after boot the BF word is history, so this row shows S3 -
+          // the watched slot's physical address - and FL, the flag byte above.
+          // S3:08087B30   FL:2C reads: the slot is 0x08087B30 (KSEG0
+          // 0x88087B30); flags 0x2C = 0010_1100: a refill of its index
+          // happened (bit7=0? no - bit5 and bit3 and bit2), see the port
+          // comment for the bit list.
+          if (d_boot_loaded) begin
+            if (column == 0) screen_char="S";
+            else if (column == 1) screen_char="3";
+            else if (column == 2) screen_char=":";
+            else if (column >= 3 && column <= 10)
+              screen_char=hex32_ascii(d_stack_probe3, column-3);
+            else if (column == 14) screen_char="F";
+            else if (column == 15) screen_char="L";
+            else if (column == 16) screen_char=":";
+            else if (column == 17) screen_char=hex_ascii({4'b0000, d_stack_flags[11:8]});
+            else if (column == 18) screen_char=hex_ascii({4'b0000, d_stack_flags[7:4]});
+            else if (column == 19) screen_char=hex_ascii({4'b0000, d_stack_flags[3:0]});
+          end else begin
           if (column == 0) screen_char="B";
           else if (column == 1) screen_char="F";
           else if (column == 2) screen_char=":";
@@ -775,6 +982,7 @@ module ki_debug_screen #(
           else if (column == 14) screen_char=":";
           else if (column >= 15 && column <= 19)
             screen_char=hex32_ascii(d_pcm_health, column-12);
+          end
         end
         // RC carries BOTH restart shapes, because they are mutually
         // exclusive explanations of the same symptom:
@@ -791,12 +999,43 @@ module ki_debug_screen #(
         //
         // With RS and RF that is a complete decision table for a restart:
         // reset, jump to ROM, software re-entry, or none of the three.
+        // AD replaces RC as of v181. RC carried both restart shapes; the
+        // memory link is now the open question, and RC's two halves are still
+        // visible where they always were - the departure count on the ET/BF
+        // row and the re-entry count in the boot summary.
+        //
+        // AD is the adapter's four link counters, cumulative and wrapping:
+        //
+        //   AD:XXXXYYYY - digits 7-4 request cycles, 3-0 beats handed over
+        // Actually eight hex digits, high field first:
+        //   digits 7-6  [31:24] cycles with a primary request asserted
+        //   digits 5-4  [23:16] primary launches (the FSM left IDLE for the
+        //                       bridge, whether directly or from its queue)
+        //   digits 3-2  [15:8]  request_done pulses
+        //   digits 1-0  [7:0]   data beats handed to the bridge
+        //
+        // One 16-word line fill = 1 launch, 8 beats, 1 done, and the bridge
+        // holds request_read high for one cycle, so a healthy 12-fill boot
+        // reads AD:0C 0C 0C 60. A fill that hangs with the adapter idle and
+        // nothing owed shows which of the four stopped first: request cycles
+        // without launches means the FSM did not take it; launches without
+        // dones means the controller never completed it; dones without beats
+        // means the controller returned no data.
         12: begin
-          if (column == 0) screen_char="R";
-          else if (column == 1) screen_char="C";
+          if (column == 0) screen_char="A";
+          else if (column == 1) screen_char="D";
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
-            screen_char=hex32_ascii(d_cpu_ret_count, column-3);
+            screen_char=hex32_ascii(d_adapter_counts, column-3);
+          // V184 S1, the D-cache evidence for the S0 load:
+          //   digits 7-3 (31:12) physical line of the last refill of the
+          //                      slot's index. 0802E is the stack's own line.
+          //   digit  2   (11:8)  {hit, miss, loaded!=stored, store captured}
+          //                      so 4 = hit and matching, 8 = miss, C = miss
+          //                      and the value differed, 0 = never captured.
+          //   digits 1-0 (7:0)   interrupts + exception entries in between.
+          else if (column >= 12 && column <= 19)
+            screen_char=hex32_ascii(d_stack_probe1, column-12);
         end
         // The disk.
         //

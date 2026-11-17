@@ -84,7 +84,23 @@ module ki_sdram_adapter (
   output wire  [24:0] controller_fast_addr,
   input  wire         controller_fast_valid,
 
-  output wire  [15:0] debug_status
+  output wire  [15:0] debug_status,
+  // V181 diagnostic: four 8-bit wrapping counters, one per link in the chain
+  // from the bridge to the controller. The question they answer is the one the
+  // V180 screen could not: when the bridge sits in SDRAM_READ_WAIT while this
+  // adapter reports ADAPTER_IDLE with nothing outstanding, WHERE the traffic
+  // stopped. The bridge has its own word (debug_sdram_counts); the two are
+  // meant to be read side by side.
+  //
+  //   [31:24] cycles with a primary request asserted (request_read||request_write)
+  //   [23:16] primary launches: the FSM left IDLE to serve owner=0, whether the
+  //           request went out directly or came from req_pending
+  //   [15:8]  request_done pulses raised to the primary
+  //   [7:0]   request_data_valid beats handed to the primary
+  //
+  // A 16-word line fill is 8 beats (two 16-bit words per beat) and 1 done, so
+  // a healthy 12-fill run reads 0C 0C 0C 60.
+  output logic [31:0] debug_counts
 );
   // What the arbitration below launches. ki_sdram_x2 carries these to the
   // controller unchanged and packs the words that come back.
@@ -192,6 +208,23 @@ module ki_sdram_adapter (
   wire launch_direct = (state == ADAPTER_IDLE) && packed_ready && startup_done &&
                        !req_pending && request_now && !(aux_pending && aux_starved);
 
+  // V181 counters. The launch and completion events are taken from the same
+  // conditions that drive issue_read/issue_write and request_done, not from
+  // the registers those drive: this always_ff would otherwise read the
+  // previous cycle's value and a back-to-back pair would be counted once.
+  wire launch_from_pending = (state == ADAPTER_IDLE) && packed_ready && startup_done &&
+                             req_pending && !(aux_pending && aux_starved);
+  wire launch_primary = launch_direct || launch_from_pending;
+  wire beat_primary   = packed_valid && !owner;
+  wire done_primary   = (state == ADAPTER_WAIT) && packed_ready && !owner;
+
+  logic [7:0] cnt_req_high = 8'd0;
+  logic [7:0] cnt_launch   = 8'd0;
+  logic [7:0] cnt_done     = 8'd0;
+  logic [7:0] cnt_beat     = 8'd0;
+
+  assign debug_counts = {cnt_req_high, cnt_launch, cnt_done, cnt_beat};
+
   always_ff @(posedge clk) begin
     request_done <= 1'b0;
     aux_done <= 1'b0;
@@ -211,7 +244,16 @@ module ki_sdram_adapter (
       aux_pending_burst <= 5'd1;
       owner <= 1'b0;
       aux_wait <= '0;
+      cnt_req_high <= 8'd0;
+      cnt_launch   <= 8'd0;
+      cnt_done     <= 8'd0;
+      cnt_beat     <= 8'd0;
     end else begin
+      if (request_now) cnt_req_high <= cnt_req_high + 8'd1;
+      if (launch_primary) cnt_launch <= cnt_launch + 8'd1;
+      if (done_primary) cnt_done <= cnt_done + 8'd1;
+      if (beat_primary) cnt_beat <= cnt_beat + 8'd1;
+
       if (!aux_pending)
         aux_wait <= '0;
       else if (!aux_starved)

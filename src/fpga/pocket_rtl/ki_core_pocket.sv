@@ -692,6 +692,39 @@ wire [31:0] debug_cpu_ds_count;
 wire [31:0] debug_cpu_ds_first;
 reg  [31:0] debug_ds_count_meta = 32'd0, debug_ds_count_sync = 32'd0;
 reg  [31:0] debug_ds_first_meta = 32'd0, debug_ds_first_sync = 32'd0;
+
+// BR (status row 9, V:0): the memory side of the CPU's stall, in one word.
+//
+// The data cache's own state machine crosses from clk_cpu; the bridge's word is
+// already in clk_core. Two flops on the cache state, the same style as every
+// other debug_* crossing here: it is a diagnostic sampled once per frame, and a
+// torn read for one frame is not worth a handshake.
+wire  [4:0]  debug_dcache_state;                                  // from the CPU
+reg   [4:0]  debug_dcache_state_meta = 5'd0, debug_dcache_state_sync = 5'd0;
+wire  [31:0] bridge_cpu_wait_info;                                // from the bridge
+// V181 link counters. BQ (row 5, once BOOT:1) is the bridge's, AD (row 12) is
+// the adapter's; both are cumulative and wrap at 8 bits per field.
+wire  [31:0] bridge_counts;                                       // debug_sdram_counts
+wire  [31:0] adapter_counts;                                      // debug_counts
+// V184 stack-slot probe: the value loaded from 0x30(sp) and the refill that
+// served its index. Straight from the CPU, shown on rows 10 and 12.
+wire  [31:0] debug_stack_probe0;
+wire  [31:0] debug_stack_probe1;
+wire  [31:0] debug_stack_probe2;
+wire  [31:0] debug_stack_probe3;
+wire  [31:0] debug_stack_probe4;
+wire  [11:0] debug_stack_flags;
+wire  [31:0] debug_array_addr;
+wire  [31:0] debug_array_data;
+// The row's 32 bits, as the screen shows them:
+//
+//   [31:27] bridge state (0 IDLE, 3/4 SDRAM read, 22/23 DCS, 24/25 video)
+//   [26:24] data-cache state bits [2:0] - 0 IDLE, 2 FILL. Bits [4:3] of the
+//           cache state are DROPPED: the row has no fourth free nibble, and
+//           0/2/3 is the whole question this row answers.
+//   [23:16] times the bridge's starvation guard admitted the CPU first
+//   [15:0]  worst CPU request age, in clk_core cycles, since reset
+wire  [31:0] debug_bridge_info;
 // PCM FIFO health, reported as AU and AF. Already in clk_core, so no
 // synchroniser is needed - ki_dcs_audio runs on the same clock the debug
 // screen does.
@@ -1173,6 +1206,10 @@ always @(posedge clk_core) begin
 	debug_cop0_probe_sync <= debug_cop0_probe_meta;
 	debug_ds_count_meta <= debug_cpu_ds_count;
 	debug_ds_count_sync <= debug_ds_count_meta;
+	// The D-cache's FSM, for the BR row. Two flops: sampled once per frame,
+	// a torn read costs one frame of a diagnostic.
+	debug_dcache_state_meta <= debug_dcache_state;
+	debug_dcache_state_sync <= debug_dcache_state_meta;
 	debug_ds_first_meta <= debug_cpu_ds_first;
 	debug_ds_first_sync <= debug_ds_first_meta;
 	debug_eret_epc_meta <= debug_cpu_eret_epc;
@@ -1348,6 +1385,15 @@ ki_cpu_core #(
 	.debug_trace_frozen(debug_cpu_trace_frozen),
 	.debug_trace_trigger(ata_restart_seen),
 	.debug_ds_count(debug_cpu_ds_count),
+	.debug_dcache_state(debug_dcache_state),
+	.debug_stack_probe0(debug_stack_probe0),
+	.debug_stack_probe1(debug_stack_probe1),
+	.debug_stack_probe2(debug_stack_probe2),
+	.debug_stack_probe3(debug_stack_probe3),
+	.debug_stack_probe4(debug_stack_probe4),
+	.debug_stack_flags(debug_stack_flags),
+	.debug_array_addr(debug_array_addr),
+	.debug_array_data(debug_array_data),
 	.debug_ds_first(debug_cpu_ds_first),
 	.debug_eret_epc(debug_cpu_eret_epc),
 	.debug_eret_target(debug_cpu_eret_target),
@@ -1469,7 +1515,9 @@ ki_memory_bridge memory_bridge
 	.debug_write_count(),
 	.debug_low_write_count(),
 	.debug_main_write_count(),
-	.debug_download_info(debug_download_info)
+	.debug_download_info(debug_download_info),
+	.debug_cpu_wait_info(bridge_cpu_wait_info),
+	.debug_sdram_counts(bridge_counts)
 );
 
 `ifdef KI_DEBUG_BUILD
@@ -1590,7 +1638,10 @@ ki_sdram_adapter sdram_adapter
 	.controller_fast_tog(controller_fast_tog),
 	.controller_fast_addr(controller_fast_addr),
 	.controller_fast_valid(controller_fast_valid),
-	.debug_status(debug_adapter_status)
+	.debug_status(debug_adapter_status),
+	// V181: the adapter's four link counters, alongside the bridge's own
+	// (debug_sdram_counts, wired to bridge_counts below). AD on the screen.
+	.debug_counts(adapter_counts)
 );
 
 // The address decomposition uses col = addr[9:1], so 512 consecutive words
@@ -1773,6 +1824,14 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
 //   row 11 ET -> BF  boot flags
 //   row 14 RP -> DP  where the decompressed program was left
 // See ki_debug_screen.sv for the bit legends.
+
+// BR: the bridge's word with the D-cache's state packed into the three spare
+// bits, which the bridge leaves zero. Anything that reads this row reads one
+// snapshot of both halves, so a bridge state and a cache state that disagree -
+// "the bridge is idle and the cache is in FILL" - can be trusted as a pair.
+assign debug_bridge_info = {bridge_cpu_wait_info[31:27],
+                            debug_dcache_state_sync[2:0],
+                            bridge_cpu_wait_info[23:0]};
 //
 // Rows 10 and 14 used to carry the loader's download FSM (DL) and the reboot
 // capture (RP/V/CA). Both answered questions that are now settled: the loader
@@ -1882,6 +1941,22 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		            {debug_cop0_probe_sync[15:8], 8'd0,
 		             debug_cop0_probe_sync[7:0], 8'd0}),
 		.reset_first(debug_reset_first),
+		// BR (row 9 under V:0): the memory side of a CPU stall, and how long the
+		// CPU waited at worst. ki_debug_screen.sv documents the digits; the
+		// bridge state numbering is ki_memory_bridge_pocket.sv's state_t.
+		.bridge_info(debug_bridge_info),
+		// BQ (row 5 under BOOT:1) and AD (row 12): the two ends of the
+		// bridge<->adapter link, so one photograph shows which end stopped.
+		.stack_probe0(debug_stack_probe0),
+		.stack_probe1(debug_stack_probe1),
+		.stack_probe2(debug_stack_probe2),
+		.stack_probe3(debug_stack_probe3),
+		.stack_probe4(debug_stack_probe4),
+		.stack_flags(debug_stack_flags),
+		.array_addr(debug_array_addr),
+		.array_data(debug_array_data),
+		.bridge_counts(bridge_counts),
+		.adapter_counts(adapter_counts),
 		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),
 		.cpu_t2_reload_count(debug_cpu_t2_reload_count_sync),
 		.video_max_v_count(video_max_v_count),

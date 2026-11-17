@@ -154,6 +154,21 @@ entity ki_cpu_core is
       -- Suppression census; see cpu_cop0.vhd.
       debug_ds_count          : out std_logic_vector(31 downto 0);
       debug_ds_first          : out std_logic_vector(31 downto 0);
+      -- The data cache's own state machine (cpu_datacache.vhd's tState'pos),
+      -- passed straight through from cpu.vhd. The Pocket status page shows its
+      -- low three bits, which is enough to tell IDLE (0) from FILL (2): a CPU
+      -- stalled with the cache in FILL is waiting for a line that never came
+      -- back; stalled with the cache in IDLE is waiting somewhere else.
+      debug_dcache_state      : out std_logic_vector(4 downto 0) := (others => '0');
+      -- V184 stack-slot probe; see cpu.vhd's port of the same name.
+      debug_stack_probe0      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe1      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe2      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe3      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe4      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_flags       : out std_logic_vector(11 downto 0) := (others => '0');
+      debug_array_addr        : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_array_data        : out std_logic_vector(31 downto 0) := (others => '0');
       -- Board-side freeze request; see cpu.vhd's port of the same name.
       debug_trace_trigger     : in  std_logic;
 
@@ -347,7 +362,7 @@ begin
          -- KI writes code and its visible framebuffers through KSEG0 during
          -- bootstrap. Keep those stores coherent with instruction fetch and
          -- scanout until the complete R4600 cache-op path is proven.
-         DATACACHEWRITETHROUGH => '0',
+         DATACACHEWRITETHROUGH => '1',  -- V182: test write-through; V181 showed stack slot corruption (AdEL at 8802EC48, lwu via a0 reloaded from 0x30(sp))
          DATACACHETLBON        => '1',
          RANDOMMISS            => (others => '0'),
          DISABLE_BOOTCOUNT     => '0',
@@ -389,6 +404,15 @@ begin
          debug_perf_events       => perf_events,
          debug_perf_mem          => perf_mem,
          debug_ds_first          => debug_ds_first,
+         debug_dcache_state      => debug_dcache_state,
+         debug_stack_probe0      => debug_stack_probe0,
+         debug_stack_probe1      => debug_stack_probe1,
+         debug_stack_probe2      => debug_stack_probe2,
+         debug_stack_probe3      => debug_stack_probe3,
+         debug_stack_probe4      => debug_stack_probe4,
+         debug_stack_flags       => debug_stack_flags,
+         debug_array_addr        => debug_array_addr,
+         debug_array_data        => debug_array_data,
          debug_trace_trigger     => debug_trace_trigger,
          mem_request           => mem_request,
          mem_rnw               => mem_rnw,

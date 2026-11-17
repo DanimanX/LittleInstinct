@@ -285,6 +285,53 @@ entity cpu is
       -- is main RAM's, and any CACHE command's.
       debug_perf_mem          : out std_logic_vector(3 downto 0);
       debug_ds_first          : out std_logic_vector(31 downto 0) := (others => '0');
+      -- The data cache's own state machine, cpu_datacache.vhd's tState'pos:
+      --   0 IDLE  1 CLEARCACHE  2 FILL  3 READWAIT  4 WAITSLOW
+      --   5 WRITEBACK1ADDR  6 WRITEBACK1READ  7 WRITEBACK1WRITE
+      --   8 WRITEBACK2WRITE 9 WRITEBACK3WRITE 10 WRITEBACK4WRITE
+      --  11 WRITEBACKDONE 12 COMMANDPROCESS 13 COMMANDDONE 14 WAYFIX
+      --  15 ALLOC 16 FILLRA_WAIT 17 FILLRA_COPY 18 FILLRA_DONE
+      --  19 REREAD 20 TAIL_WAIT 21 TAIL_ANS 22 TAIL_STORE
+      -- Live, not frozen: the question it answers is "is the CPU stuck INSIDE
+      -- the cache, or did it never get that far", which is asked while the
+      -- fault is happening. 2 (FILL) forever means a fill that never came
+      -- back; 0 (IDLE) with the CPU stalled means the wait is elsewhere.
+      debug_dcache_state      : out std_logic_vector(4 downto 0) := (others => '0');
+      -- V184 stack-slot probe. The V183 board fault was an AdEL at
+      -- 0x8802EC48 with t6 = a garbage pointer, where t6 is loaded from
+      -- 0x30(sp) at 0x8802EC44 and that slot was stored at 0x8802EC2C. This
+      -- pair latches the three things a second photograph needs:
+      --
+      --   probe0 [31:0]  the value the `lw t6,0x30(sp)` at 0x8802EC44
+      --                  actually delivered (hardware: a garbage pointer).
+      --   probe1 [31:12] physical line address (address[31:12]) of the most
+      --                  recent D-cache REFILL of the slot's own index
+      --                  (address bits 12:5). If this is not the stack's line,
+      --                  the refill took the wrong line - a tag/index fault.
+      --   probe1 [11]    the load hit the D-cache
+      --   probe1 [10]    the load missed
+      --   probe1 [9]     the value loaded differs from the value stored
+      --   probe1 [8]     a store to 0x30(sp) was captured
+      --   probe1 [7:0]   interrupts + exceptions taken between the two
+      --                  (irq_granted and restart counters, saturating)
+      --
+      -- Keyed on the STAGE-4 DATA ADDRESS, not on the PC: the address is what
+      -- distinguishes these two accesses from every other store and load the
+      -- game makes, and it is valid in the cycle the access is issued.
+      debug_stack_probe0      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe1      : out std_logic_vector(31 downto 0) := (others => '0');
+      -- V185: the same watched pair, extended. S2 = the value stored,
+      -- S3 = the slot's physical address, S4 = the word the refill put there,
+      -- and debug_stack_flags = {refill seen, refill was our line, the
+      -- write-through store left for the bridge, it carried the stored value,
+      -- 4-bit count of other stores to the same line in between}.
+      debug_stack_probe2      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe3      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_probe4      : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_stack_flags       : out std_logic_vector(11 downto 0) := (others => '0');
+      -- V186: who wrote the 3-entry pointer array. See g_stack_probe.
+      debug_array_addr        : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_array_data        : out std_logic_vector(31 downto 0) := (others => '0');
       debug_trace_frozen      : out std_logic := '0';
       debug_trace_trigger     : in  std_logic := '0';
 
@@ -558,6 +605,7 @@ architecture arch of cpu is
    signal debug_dep_pc_register        : std_logic_vector(31 downto 0) := (others => '0');
    signal debug_dep_trigger_register   : std_logic_vector(1 downto 0) := (others => '0');
    signal debug_dep_valid_register     : std_logic := '0';
+   signal probe_freeze                 : std_logic := '0';
    signal debug_prev_op_live           : std_logic_vector(31 downto 0) := (others => '0');
    signal debug_exc_cause_register     : std_logic_vector(7 downto 0) := (others => '0');
    signal debug_badvaddr_register      : std_logic_vector(31 downto 0) := (others => '0');
@@ -1743,6 +1791,367 @@ begin
 
    debug_ds_count      <= std_logic_vector(cop0_debug_ds_count);
    debug_ds_first      <= std_logic_vector(cop0_debug_ds_first);
+   -- The cache's own FSM, exported for the Pocket status page. Nothing here
+   -- transforms it: tState'pos, straight from the cache.
+   debug_dcache_state  <= datacache_debug_state;
+
+   -- ---------------------------------------------------------------------
+   -- V184 stack-slot probe. See the port comments for the field layout.
+   --
+   -- The slot address is 0x8800_802C + 4 for `sw a0,0x30(sp)` where sp was
+   -- 0x8800_8000-0x30+0x30; the two addresses below are the ones the game's
+   -- own code uses, in the physical form stage 4 presents.
+   -- ---------------------------------------------------------------------
+   g_stack_probe : block
+      -- V184/V185: the store-then-load probe.
+      --
+      -- The board fault, V184: `sw a0,0x30(sp)`, three more stores, then
+      -- `lw t6,0x30(sp)` returns 0xB4697A06 - a word that appears nowhere in
+      -- the program image - and the next instruction takes an AdEL. V184's
+      -- report card said the load HIT the D-cache and came back different, and
+      -- that a refill of the slot's index had happened in between. So the
+      -- question is no longer "did the cache lose it" but "what did the refill
+      -- put there, and did the write-through write ever reach SDRAM".
+      --
+      -- V185 adds, for the same watched pair: the value stored (S2), the slot's
+      -- physical address (S3), the word the refill actually delivered at the
+      -- slot's qword (S4), and four flags. See the assignments at the bottom of
+      -- this block for the packing.
+      --
+      -- Keyed on the DATA address, and on the CPU's own physical form: stage 4
+      -- presents 0x0802EC2C for 0x8802EC2C. The address that matters is
+      -- sp+0x30, not any instruction address, and three unrelated stores land
+      -- between the two accesses, so a small history.
+      constant HN : integer := 4;
+      type t_hist is array (0 to HN-1) of unsigned(31 downto 0);
+      type t_data is array (0 to HN-1) of std_logic_vector(31 downto 0);
+      signal h_addr : t_hist := (others => (others => '0'));
+      signal h_data : t_data := (others => (others => '0'));
+      signal h_wr   : integer range 0 to HN-1 := 0;
+      signal h_n    : integer range 0 to HN := 0;
+      -- V185: the window (refill seen / same line / write-through issued /
+      -- refill word / other stores) is kept PER HISTORY ENTRY, not globally.
+      -- Globally it describes whichever store came last, which is the wrong
+      -- store: the caller does sw(0x1c), sw(0x30), sw(0x18), sw(0x2c) and THEN
+      -- lw(0x30), so a single window reports 0x2c's state against 0x30's loaded
+      -- value. That was a real defect in the first V185 cut.
+      signal h_rseen : std_logic_vector(HN-1 downto 0) := (others => '0');
+      signal h_rsame : std_logic_vector(HN-1 downto 0) := (others => '0');
+      signal h_wt    : std_logic_vector(HN-1 downto 0) := (others => '0');
+      signal h_wtd   : std_logic_vector(HN-1 downto 0) := (others => '0');
+      signal h_rword : t_data := (others => (others => '0'));
+      signal h_beat  : t_hist := (others => (others => '0'));
+      signal h_other : t_hist := (others => (others => '0'));
+
+      signal ld_pending : std_logic := '0';
+      signal ld_addr    : unsigned(31 downto 0) := (others => '0');
+      signal ld_hist_i  : integer range 0 to HN-1 := 0;
+      signal rp_mm_late : std_logic := '0';
+      signal ld_hit     : std_logic := '0';
+      signal ld_miss    : std_logic := '0';
+      signal ev_int     : unsigned(7 downto 0) := (others => '0');
+      signal ev_exc     : unsigned(7 downto 0) := (others => '0');
+      signal irq_mark   : unsigned(31 downto 0) := (others => '0');
+      signal exc_mark   : unsigned(15 downto 0) := (others => '0');
+
+      -- V185 window state, live from the watched store until the load.
+
+      -- The report card: the last COMPLETED store->load pair.
+      signal rp_data    : std_logic_vector(31 downto 0) := (others => '0');  -- loaded
+      signal rp_flags   : std_logic_vector(11 downto 0) := (others => '0');
+      signal rp_ln      : unsigned(19 downto 0) := (others => '0');
+      signal rp_stored  : std_logic_vector(31 downto 0) := (others => '0');  -- S2
+      signal rp_slot    : std_logic_vector(31 downto 0) := (others => '0');  -- S3
+      signal rp_rflword : std_logic_vector(31 downto 0) := (others => '0');  -- S4
+      signal rp_vflags  : std_logic_vector(7 downto 0)  := (others => '0');
+
+      -- V186: the 3-entry pointer array.
+      --
+      -- The board's a0 for F_EC24 was 0xB46D7A56, a word the image does not
+      -- contain, while the array's entries are built from a CONSTANT
+      -- (lui a0,0x8850 -> slot1 = 0x88500000, slot2 = 0x88500E00). A constant
+      -- cannot become garbage by itself, so a store wrote that stack slot
+      -- between the setup and the read. This finds it: learn the array base
+      -- from the setup store, then remember the last store inside it.
+      --
+      -- Arming rule: a 32-bit store whose data high half is 0x8850. That is
+      -- the caller's constant being written into the array's slot 1; the array
+      -- base is that address - 4.
+      signal armed      : std_logic := '0';
+      signal arr_lo     : unsigned(31 downto 0) := (others => '0');
+      signal arr_hi     : unsigned(31 downto 0) := (others => '0');
+      signal lp_addr    : unsigned(31 downto 0) := (others => '0');
+      signal lp_data    : std_logic_vector(31 downto 0) := (others => '0');
+      signal lp_pc      : std_logic_vector(31 downto 0) := (others => '0');
+      signal l_hit      : std_logic := '0';
+      signal l_changed  : std_logic := '0';
+   begin
+      process (clk93)
+         variable hit_i : integer range 0 to HN := HN;
+         variable found : boolean;
+      begin
+         if rising_edge(clk93) then
+            if (reset_93 = '1') then
+               h_wr <= 0; h_n <= 0; ld_pending <= '0';
+               ld_hit <= '0'; ld_miss <= '0';
+               ev_int <= (others => '0'); ev_exc <= (others => '0');
+               irq_mark <= (others => '0'); exc_mark <= (others => '0');
+               rp_data <= (others => '0'); rp_flags <= (others => '0');
+               rp_ln <= (others => '0');
+               rp_stored <= (others => '0'); rp_slot <= (others => '0');
+               rp_rflword <= (others => '0'); rp_vflags <= (others => '0');
+               armed <= '0'; l_hit <= '0'; l_changed <= '0';
+            elsif (ce_93 = '1' and probe_freeze = '0') then
+               -- A cached 32-bit store enters the history and OPENS the window.
+               if (executeNew = '1' and stall4Masked = "00000" and
+                   executeMemWriteEnable = '1' and executeMem64Bit = '0') then
+                  h_addr(h_wr) <= executeMemAddress;
+                  h_data(h_wr) <= std_logic_vector(executeMemWriteData(31 downto 0));
+                  if (h_wr = HN-1) then h_wr <= 0; else h_wr <= h_wr + 1; end if;
+                  if (h_n < HN) then h_n <= h_n + 1; end if;
+                  -- V185: this store is now the watched one. The window runs
+                  -- from here to the load, which is the interval the board's
+                  -- fault lives in.
+                  h_rseen(h_wr) <= '0';
+                  h_rsame(h_wr) <= '0';
+                  h_wt(h_wr)    <= '0';
+                  h_wtd(h_wr)   <= '0';
+                  h_other(h_wr) <= (others => '0');
+                  h_beat(h_wr)  <= (others => '0');
+                  ev_int <= (others => '0');
+                  ev_exc <= (others => '0');
+                  irq_mark <= debug_irq_count_register;
+                  exc_mark <= debug_entry_count_register;
+               end if;
+
+               -- V186 arming, and the intruder that follows it.
+               --
+               -- The caller builds the array from ONE constant: `lui a0,0x8850`
+               -- gives 0x88500000 and `+0xE00` gives 0x88500E00. So every
+               -- SETUP store into the array has a data high half of 0x8850,
+               -- and any store into the same slot word that does NOT is an
+               -- intruder. That is the whole rule, and it is why the window
+               -- only ever GROWS: the first version re-armed on the second
+               -- setup store (0x88500E00 has the same high half) and moved the
+               -- window off the slot it was supposed to be watching.
+               --
+               -- cpu_pocket rotates a store's 64-bit word so the addressed
+               -- dword sits at the lane its address names; address bit 2
+               -- selects which half is the slot's data.
+               if (executeNew = '1' and stall4Masked = "00000" and
+                   executeMemWriteEnable = '1') then
+                  -- EITHER half names the constant: the lane the store's dword
+                  -- lands in is not guaranteed to follow address bit 2 for a
+                  -- 32-bit store in this pipeline, and arming must not depend on
+                  -- resolving that. (The intruder's data below is still read
+                  -- from the lane the address names, which is what the cache
+                  -- will hold.)
+                  -- V186b (Claude): arm on the PC of the two setup stores in
+                  -- F_E4B0 (sw t6,4(t7) @8802E4CC and sw t9,8(t0) @8802E4DC),
+                  -- not on 0x8850 data: 0x88500000 is used by 14 sites in the
+                  -- game and a data-keyed window that only grows could span
+                  -- unrelated memory. E4CC re-arms afresh on every call.
+                  if (prof_pc2 = x"8802E4CC" or prof_pc2 = x"8802E4DC") then
+                     if (armed = '0' or prof_pc2 = x"8802E4CC") then
+                        arr_lo <= executeMemAddress - 4;
+                        arr_hi <= executeMemAddress + 4;
+                        armed  <= '1';
+                        l_hit  <= '0';
+                        l_changed <= '0';
+                     else
+                        if (executeMemAddress < arr_lo) then
+                           arr_lo <= executeMemAddress - 4;
+                        end if;
+                        if (executeMemAddress > arr_hi) then
+                           arr_hi <= executeMemAddress + 4;
+                        end if;
+                     end if;
+                  elsif (armed = '1' and
+                         executeMemAddress >= arr_lo and
+                         executeMemAddress <= arr_hi) then
+                     -- Inside the array and not a 0x8850 setup store: this is
+                     -- the write that turned a constant into a pointer.
+                     lp_addr <= executeMemAddress;
+                     lp_pc   <= prof_pc2;
+                     if (executeMemAddress(2) = '1') then
+                        lp_data <= std_logic_vector(executeMemWriteData(63 downto 32));
+                     else
+                        lp_data <= std_logic_vector(executeMemWriteData(31 downto 0));
+                     end if;
+                     l_hit     <= '1';
+                     l_changed <= '1';
+                  end if;
+               end if;
+
+               -- V185: a refill of the watched slot's INDEX. The line it asks
+               -- for is what the tags will hold afterwards, so "same line"
+               -- here is the same question as "did the eviction refill the
+               -- right line".
+               if (datacache_request = '1') then
+                  for i in 0 to HN-1 loop
+                     if (i < h_n) and
+                        (datacache_reqAddr(12 downto 5) = h_addr(i)(12 downto 5)) then
+                        h_rseen(i) <= '1';
+                        if (datacache_reqAddr(31 downto 12) = h_addr(i)(31 downto 12)) then
+                           h_rsame(i) <= '1';
+                        end if;
+                        h_beat(i) <= (others => '0');
+                     end if;
+                  end loop;
+               end if;
+
+               -- V185: the words the refill delivers, in qword order. Beats
+               -- arrive one per dc_ready while the fill is active; beat k is
+               -- qword k of the line (DCACHE_CWF_FB is off in this build, so
+               -- fill_start is 0 and fill_q = fill_beat). The slot's own qword
+               -- is the one to keep.
+               if (datacache_active = '1' and dc_ready = '1') then
+                  for i in 0 to HN-1 loop
+                     if (i < h_n) and (h_beat(i) = h_addr(i)(4 downto 3)) then
+                        if (h_addr(i)(2) = '0') then
+                           h_rword(i) <= std_logic_vector(bus_to_cpu32(dc_dout(31 downto 0)));
+                        else
+                           h_rword(i) <= std_logic_vector(bus_to_cpu32(dc_dout(63 downto 32)));
+                        end if;
+                     end if;
+                     h_beat(i) <= h_beat(i) + 1;
+                  end loop;
+               end if;
+
+               -- V185: did the write-through half of that store ever leave for
+               -- the bridge, and did it carry the stored value? In this build
+               -- DATACACHEWRITETHROUGH is '1', so every cached store also
+               -- raises mem4_request with rnw='0' (cpu.vhd's stage-4 block).
+               if (mem4_request = '1' and mem4_rnw = '0') then
+                  for i in 0 to HN-1 loop
+                     if (i < h_n) and (mem4_address = h_addr(i)) then
+                        h_wt(i) <= '1';
+                        if (mem4_dataWrite(31 downto 0) = h_data(i) and
+                            mem4_writeMask = x"0F") then
+                           h_wtd(i) <= '1';
+                        end if;
+                     end if;
+                  end loop;
+               end if;
+
+               -- V185: other stores to the same LINE between the two accesses.
+               -- A write to the neighbouring qword would show up here if the
+               -- corruption came from a store landing at the wrong offset.
+               if (executeNew = '1' and stall4Masked = "00000" and
+                   executeMemWriteEnable = '1') then
+                  for i in 0 to HN-1 loop
+                     if (i < h_n) and (executeMemAddress /= h_addr(i)) and
+                        (executeMemAddress(31 downto 5) = h_addr(i)(31 downto 5)) and
+                        (h_other(i) /= x"F") then
+                        h_other(i) <= h_other(i) + 1;
+                     end if;
+                  end loop;
+               end if;
+
+               -- A load whose address is in the history: watch it.
+               if (executeNew = '1' and stall4Masked = "00000" and
+                   executeMemReadEnable = '1' and executeMem64Bit = '0') then
+                  found := false;
+                  for i in 0 to HN-1 loop
+                     if (i < h_n) and (h_addr(i) = executeMemAddress) then
+                        found := true; hit_i := i;
+                     end if;
+                  end loop;
+                  if (found) then
+                     ld_pending <= '1';
+                     ld_addr    <= executeMemAddress;
+                     ld_hist_i  <= hit_i;
+                     if (datacache_debug_state = "00000") then
+                        ld_hit <= '1';
+                     else
+                        ld_miss <= '1';
+                     end if;
+                  end if;
+               end if;
+
+               -- The load was answered: complete the report card.
+               if (ld_pending = '1' and (datacache_readdone = '1' or
+                                         mem_finished_read = '1')) then
+                  ld_pending <= '0';
+                  if (writebackWriteEnable = '1') then
+                     rp_data <= std_logic_vector(writebackData(31 downto 0));
+                  else
+                     rp_data <= datacache_data_out(31 downto 0);
+                  end if;
+                  rp_flags <= ld_hit & ld_miss & rp_mm_late & '1' &
+                              std_logic_vector(ev_int + ev_exc);
+                  -- Everything comes from the history entry the LOAD matched,
+                  -- not from the most recent store: see the note on h_rseen.
+                  if (h_rseen(ld_hist_i) = '1') then
+                     rp_ln <= h_addr(ld_hist_i)(31 downto 12);
+                  end if;
+                  rp_stored  <= h_data(ld_hist_i);
+                  rp_slot    <= std_logic_vector(h_addr(ld_hist_i));
+                  rp_rflword <= h_rword(ld_hist_i);
+                  rp_vflags  <= h_rseen(ld_hist_i) & h_rsame(ld_hist_i) &
+                                h_wt(ld_hist_i) & h_wtd(ld_hist_i) &
+                                std_logic_vector(h_other(ld_hist_i)(3 downto 0));
+               end if;
+
+               if (debug_irq_count_register /= irq_mark) then
+                  if (ev_int /= x"FF") then ev_int <= ev_int + 1; end if;
+                  irq_mark <= debug_irq_count_register;
+               end if;
+               if (debug_entry_count_register /= exc_mark) then
+                  if (ev_exc /= x"FF") then ev_exc <= ev_exc + 1; end if;
+                  exc_mark <= debug_entry_count_register;
+               end if;
+            end if;
+         end if;
+      end process;
+
+      -- Compare the ALIGNED load result one cycle after the card is written
+      -- (datacache_data_out is pre-alignment, so comparing it directly gives a
+      -- false mismatch on every unaligned load - a bug this probe had).
+      process (clk93)
+      begin
+         if rising_edge(clk93) then
+            if (rp_data /= rp_stored) then rp_mm_late <= '1'; else rp_mm_late <= '0'; end if;
+         end if;
+      end process;
+
+      -- Card packing, all from the same completed pair:
+      --   probe0 [31:0] S0  the value the load delivered
+      --   probe1 [31:12] S1 the line of the last refill of the slot's index
+      --          [11] hit [10] miss [9] loaded /= stored [8] pair completed
+      --          [7:0] interrupts + exception entries in between
+      --   probe2 [31:0] S2 the value STORED (what the load should have found)
+      --   probe3 [31:0] S3 the slot's physical address
+      --   probe4 [31:0] S4 the word the refill delivered at the slot's qword
+      --   flags [7]   a refill of the slot's index happened in between
+      --         [6]   ... and asked for the slot's own line
+      --         [5]   the write-through store was issued to the bridge
+      --         [4]   ... carrying the stored value (and a 0x0F byte mask)
+      --         [3:0] other stores to the same line in between
+      debug_stack_probe0 <= rp_data;
+      debug_stack_probe1 <= std_logic_vector(rp_ln) & rp_flags;
+      debug_stack_probe2 <= rp_stored;
+      -- V186b: after an intruder hit S3 shows the INTRUDER's address
+      -- (FL[10]=1 says which); before, the watched slot as in V185.
+      debug_stack_probe3 <= std_logic_vector(lp_addr) when l_hit = '1' else rp_slot;
+      debug_stack_probe4 <= rp_rflword;
+      -- V186 flags, same freeze as everything else:
+      --   [11] the array's setup store was seen (armed)
+      --   [10] another store landed inside the 3-entry array
+      --   [9]  that store's value differs from the setup value
+      --   [8]  that value is odd (the board's garbage was odd-aligned)
+      --   [7:0] V185's flags
+      debug_stack_flags  <= armed & l_hit & l_changed & lp_data(0) &
+                            rp_vflags(7 downto 0);
+      -- Before a hit this shows the ARRAY BASE the watchpoint learned, which is
+      -- itself worth having: it names the frame. After a hit it shows the
+      -- intruder's address instead.
+      -- V186b: after a hit, row 8 tail is the intruder's PC (its address
+      -- moved to S3); before a hit, the array base the watchpoint learned.
+      debug_array_addr <= lp_pc when l_hit = '1'
+                          else std_logic_vector(arr_lo);
+      debug_array_data   <= lp_data;
+   end block;
    debug_eret_epc      <= eret_epc_held;
    debug_eret_target   <= eret_target_held;
    debug_eret_flags    <= eret_flags_held;
@@ -1937,6 +2346,7 @@ begin
             debug_dep_pc_register      <= (others => '0');
             debug_dep_trigger_register <= (others => '0');
             debug_dep_valid_register   <= '0';
+            probe_freeze               <= '0';
             debug_exc_cause_register   <= (others => '0');
             debug_badvaddr_register    <= (others => '0');
          elsif (ce_93 = '1' and stall = 0 and decodeNew = '1') then
@@ -1974,6 +2384,14 @@ begin
                debug_dep_valid_register   <= '1';
                debug_exc_cause_register   <= std_logic_vector(cop0_debug_cause(7 downto 0));
                debug_badvaddr_register    <= std_logic_vector(cop0_debug_badvaddr);
+               -- V184: freeze the stack probe on a FAULT departure only. An
+               -- ordinary call into ROM, an interrupt (0), syscall (8) or
+               -- break (9) leaves it running.
+               if (cop0_debug_cause(6 downto 2) /= "00000" and
+                   cop0_debug_cause(6 downto 2) /= "01000" and
+                   cop0_debug_cause(6 downto 2) /= "01001") then
+                  probe_freeze <= '1';
+               end if;
             end if;
 
             -- The other restart shape: the game jumps straight back to its own

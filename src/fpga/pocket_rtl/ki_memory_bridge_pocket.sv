@@ -162,7 +162,38 @@ module ki_memory_bridge #(
   output logic [31:0] debug_low_write_count = 32'h0000_0000,
   output logic [31:0] debug_main_write_count = 32'h0000_0000,
   // Loader-side state for the debug page: FSM, queue depth, end-to-end flags.
-  output logic [31:0] debug_download_info
+  output logic [31:0] debug_download_info,
+  // The CPU port under contention, for the status page's BR row:
+  //
+  //   [31:27] this bridge's state, live, indexed per the state_t enum
+  //           (0 IDLE, 1 BOOT_CACHE_READ_WAIT, ... 25 VID_WAIT)
+  //   [26:24] unused here; ki_core_pocket.sv fills them with the data
+  //           cache's own state bits [4:3] - they are 0 from this port alone
+  //   [23:16] how many times the starvation guard admitted the CPU ahead of
+  //           video/DCS, saturating
+  //   [15:0]  the WORST age a CPU request ever reached since reset, in
+  //           clk_core cycles, saturating at 16'hFFFF. A maximum, not the
+  //           live age: after a hang the photo still shows the age at the
+  //           stall, and after a clean boot it shows the worst case.
+  output logic [31:0] debug_cpu_wait_info,
+  // V181 diagnostic: the read path of THIS SIDE of the adapter link. The V180
+  // hardware reading was the bridge parked in SDRAM_READ_WAIT while the
+  // adapter reported ADAPTER_IDLE with nothing owed, which says only that the
+  // two disagree; these four counters say which side stopped counting.
+  //
+  //   [31:24] sdram_read bursts issued (wrapping)
+  //   [23:16] sdram_data_valid beats seen while in SDRAM_READ_WAIT (wrapping)
+  //   [15:8]  sdram_done pulses, in ANY state (wrapping)
+  //   [7]     done_owed, live
+  //   [6]     sticky: a done HAS been seen during the read in progress. Cleared
+  //           on the cycle this bridge enters SDRAM_READ_WAIT, set by a done
+  //           while in it. If it is 0 with [15:8] advanced past the last
+  //           read's share, every done is being discarded as an owed one.
+  //   [5]     sdram_ready, live
+  //   [4:0]   read_words_remaining, live
+  //
+  // A healthy 16-word line fill is one sdram_read, 8 beats and 1 done.
+  output logic [31:0] debug_sdram_counts
 );
   import ki_board_pkg::*;
 
@@ -414,6 +445,93 @@ module ki_memory_bridge #(
   // A CPU request IDLE may start now. Every decision below that would start
   // one uses this, so a held request looks to them like no request at all.
   wire cpu_turn = have_cpu && !cpu_hold;
+
+  // ---------------------------------------------------------------- CPU starvation guard
+  //
+  // IDLE serves download, then video, then the DCS ROM, then the CPU - and
+  // until now nothing bounded the first two. A CPU request could therefore be
+  // postponed for as long as scanout and the sound board kept asking, with no
+  // liveness guarantee at all.
+  //
+  // That is not hypothetical: on the first Pocket run of v1.1.0 the boot ROM
+  // hung on its first data-cache line fill (`lw zero,0(v0)` at 0xBFC003FC,
+  // v0 = 0x80000000), with the CPU stalled and video plus DCS traffic live.
+  // The fill is the first SDRAM read that core ever issues - every earlier
+  // access was answered from the boot cache - so it is also the first time an
+  // unbounded low-priority wait could be entered at all.
+  //
+  // So: a CPU request that has waited 64 clk_core cycles (cpu_wait[6]) wins
+  // the IDLE arbitration outright. The guard removes only the video and DCS
+  // terms - the two that can repeat indefinitely. Download, the write-back
+  // flush, the framebuffer line write and the gathered-store flush all still
+  // go first: those are finite, and a flush in particular must not be
+  // interleaved with a CPU read it would then be unable to order.
+  //
+  // 64 cycles is ~1.28 us at 50 MHz, chosen to be far longer than the ~28
+  // cycles of scanout interference measured on this path
+  // (tests/sim/tb_cpu_line_fills.sv), so the guard is invisible in normal
+  // operation and only fires on a genuinely repeating requester.
+  logic [6:0] cpu_wait = 7'd0;      // saturating cycles the CPU has had a request waiting
+  wire        cpu_starved = cpu_turn && cpu_wait[6];
+
+  // Debug: what the bridge last did for the CPU port, and the worst it ever
+  // made the CPU wait. See the port's comment for the bit layout.
+  logic [4:0]  dbg_state_live    = 5'd0;
+  logic [15:0] dbg_age           = 16'd0;   // this request's age, saturating
+  logic [15:0] dbg_age_max       = 16'd0;   // worst since reset, saturating
+  logic [7:0]  dbg_starve_win    = 8'd0;    // saturating count of starved CPU admissions
+
+  // V181 read-path counters. Their own always_ff, reset by `reset` alone: the
+  // state machine's reset is conditional on the loader being quiet, and a
+  // diagnostic that survives a loader reset is worse than none.
+  logic [7:0]  dbg_rd_cnt        = 8'd0;
+  logic [7:0]  dbg_beat_cnt      = 8'd0;
+  logic [7:0]  dbg_done_cnt      = 8'd0;
+  logic        dbg_rd_done_seen  = 1'b0;
+  logic        dbg_rd_wait_d     = 1'b0;    // state was SDRAM_READ_WAIT last cycle
+  // One-cycle pulse from the state machine's IDLE CPU branch: this cycle the
+  // CPU was admitted while starved. A pulse rather than a second driver for
+  // dbg_starve_win, which belongs to one always_ff.
+  logic        starve_evt        = 1'b0;
+
+  always_ff @(posedge clk) begin
+    dbg_state_live <= state[4:0];
+
+    if (reset) begin
+      cpu_wait       <= 7'd0;
+      dbg_age        <= 16'd0;
+      dbg_age_max    <= 16'd0;
+      dbg_starve_win <= 8'd0;
+    end else begin
+      // How long the CPU has had a request waiting for this bridge to serve it.
+      // Cleared the moment there is nothing to serve, or the answer goes out;
+      // saturating, because it only exists to reach the guard's threshold and
+      // to be readable afterwards.
+      if (!have_cpu || cpu_done) begin
+        cpu_wait <= 7'd0;
+      end else if (cpu_wait != 7'h7F) begin
+        cpu_wait <= cpu_wait + 7'd1;
+      end
+
+      // The live age, and the worst it has ever been. dbg_age_max is the value
+      // the status page shows: a photograph taken after a hang still reads the
+      // age the request had reached, which the live age alone would not give
+      // once the request is answered or dropped.
+      if ((cpu_request && !cpu_pending) || cpu_done) begin
+        dbg_age <= 16'd0;
+      end else if (have_cpu && dbg_age != 16'hFFFF) begin
+        dbg_age <= dbg_age + 16'd1;
+      end
+
+      if (starve_evt && dbg_starve_win != 8'hFF) begin
+        dbg_starve_win <= dbg_starve_win + 8'd1;
+      end
+
+      if (dbg_age > dbg_age_max) begin
+        dbg_age_max <= dbg_age;
+      end
+    end
+  end
 
   // See the perf_* ports. perf_frame is already in this clock domain, so the
   // edge detect is only to tolerate a multi-cycle strobe.
@@ -857,6 +975,7 @@ module ki_memory_bridge #(
     fb_write_accept <= 1'b0;
     sdram_read <= 1'b0;
     sdram_write <= 1'b0;
+    starve_evt <= 1'b0;
 
     if ((wb_count != 3'd0) && !wb_idle[5]) wb_idle <= wb_idle + 1'b1;
     if (sdram_done && done_owed) done_owed <= 1'b0;
@@ -1000,10 +1119,13 @@ module ki_memory_bridge #(
               download_inflight <= 1'b1;
               state <= DOWNLOAD_SDRAM_WRITE_ISSUE;
             end
-          end else if (!ioctl_download && video_request && !video_done && !vid_inflight) begin
+          end else if (!ioctl_download && !cpu_starved && video_request && !video_done && !vid_inflight) begin
+            // !cpu_starved: a CPU request that has waited 64 cycles outranks
+            // scanout. See the CPU starvation guard above.
             vid_inflight <= 1'b1;
             state <= VID_ISSUE;
-          end else if (!ioctl_download && dcs_rom_request && !dcs_rom_ready && !dcs_rom_inflight && !dcs_rom_request_seen_level) begin
+          end else if (!ioctl_download && !cpu_starved && dcs_rom_request && !dcs_rom_ready && !dcs_rom_inflight && !dcs_rom_request_seen_level) begin
+            // !cpu_starved: and outranks the sound board too.
             dcs_rom_req_addr <= dcs_rom_address;
             dcs_rom_inflight <= 1'b1;
             dcs_rom_request_seen_level <= 1'b1;
@@ -1070,6 +1192,12 @@ module ki_memory_bridge #(
             else
               debug_main_write_count <= debug_main_write_count + 1'b1;
           end else if (cpu_turn && !active_line_write) begin
+            // Debug: this is the CPU being admitted, and it was admitted
+            // whether or not the guard fired - count only the cycles where it
+            // did, so the page says how often the guard actually mattered.
+            if (cpu_starved) begin
+              starve_evt <= 1'b1;
+            end
             // !active_line_write: a whole-line write belongs to the burst path
             // above and nowhere else. Without this it could be served here as
             // an ordinary 64-bit write - storing 8 of its 32 bytes and
@@ -1594,6 +1722,50 @@ module ki_memory_bridge #(
   // share ki_sdram_burst through this bridge, so all CPU SDRAM requests must be
   // serialized through IDLE rather than bypassing the bridge via fast_tog.
   assign fast_ok = 1'b0;
+
+  // sdram_read is a one-cycle registered pulse in the state machine above, so
+  // reading it here sees the previous cycle's value - still exactly one count
+  // per burst. sdram_done and sdram_data_valid are inputs, sampled directly.
+  always_ff @(posedge clk) begin
+    if (reset) begin
+      dbg_rd_cnt       <= 8'd0;
+      dbg_beat_cnt     <= 8'd0;
+      dbg_done_cnt     <= 8'd0;
+      dbg_rd_done_seen <= 1'b0;
+      dbg_rd_wait_d    <= 1'b0;
+    end else begin
+      if (sdram_read)                                dbg_rd_cnt   <= dbg_rd_cnt + 8'd1;
+      if (sdram_data_valid && (state == SDRAM_READ_WAIT)) dbg_beat_cnt <= dbg_beat_cnt + 8'd1;
+      if (sdram_done)                                dbg_done_cnt <= dbg_done_cnt + 8'd1;
+
+      dbg_rd_wait_d <= (state == SDRAM_READ_WAIT);
+      // Clear takes priority: a done arriving on the very cycle this bridge
+      // enters SDRAM_READ_WAIT belongs to the previous transaction, and
+      // crediting it to the new one is exactly the confusion this bit exists
+      // to remove.
+      if ((state == SDRAM_READ_WAIT) && !dbg_rd_wait_d)
+        dbg_rd_done_seen <= 1'b0;
+      else if (sdram_done && (state == SDRAM_READ_WAIT))
+        dbg_rd_done_seen <= 1'b1;
+    end
+  end
+
+  assign debug_sdram_counts = {
+    dbg_rd_cnt,
+    dbg_beat_cnt,
+    dbg_done_cnt,
+    done_owed,
+    dbg_rd_done_seen,
+    sdram_ready,
+    read_words_remaining
+  };
+
+  assign debug_cpu_wait_info = {
+    dbg_state_live,
+    3'b000,          // filled with the D-cache's state bits [4:3] in ki_core_pocket.sv
+    dbg_starve_win,
+    dbg_age_max
+  };
 
   // One word for the debug page: enough to tell "the loader is waiting for the
   // SDRAM" (state=DOWNLOAD_SDRAM_WRITE_ISSUE, sdram_ready=0) from "the host
