@@ -76,8 +76,25 @@ module ki_sdram_x2 (
   assign ctl_din   = req_din;
   assign ctl_wtbt  = req_wtbt;
   assign ctl_burst = req_burst;
-  assign ctl_rd    = req_rd;
-  assign ctl_we    = req_we;
+  // THE STROBES ARE REGISTERED ON clk2x (V183). pocket_ki.sdc gives the
+  // clk -> clk2x paths a multicycle of 2: they are only guaranteed at the
+  // SECOND clk2x edge after the clk edge that launched them. The first edge
+  // lands 0.556 ns after launch and sees each bit old or new depending on
+  // placement. Passing req_rd straight through let ki_sdram_burst's new_rd and
+  // this module's rd_start fire on that first edge while addr/burst were still
+  // in flight - and disagree with each other: on hardware x2 counted 16 words
+  // owed while the controller ran a 0-beat read and went ready (V182).
+  // Through rd_q the first edge that can see a request is the second one, by
+  // which time every field the adapter registered with it has settled; the
+  // fields hold until the next launch, which waits for ready.
+  logic rd_q = 1'b0;
+  logic we_q = 1'b0;
+  always_ff @(posedge clk2x) begin
+    rd_q <= init ? 1'b0 : req_rd;
+    we_q <= init ? 1'b0 : req_we;
+  end
+  assign ctl_rd    = rd_q;
+  assign ctl_we    = we_q;
 
 
   // ---------------------------------------------------------------- packing

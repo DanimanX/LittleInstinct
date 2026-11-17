@@ -51,7 +51,13 @@ module ki_fast_fill (
 
   // Bit 0 marks a qword read, to the controller as here.
   wire [27:0] storage = ki_storage_address({req_line[31:1], 1'b0});
-  assign ctl_tog  = req_tog;
+  // Registered on clk_ctl for the same reason as ki_sdram_x2's rd_q (V183):
+  // the toggle must not reach ki_sdram_burst on the clk_ctl edge 0.556 ns
+  // after launch, where ctl_addr is not yet guaranteed; a stale address there
+  // reads the wrong line silently.
+  logic tog_q = 1'b0;
+  always_ff @(posedge clk_ctl) tog_q <= req_tog;
+  assign ctl_tog  = tog_q;
   assign ctl_addr = {storage[24:1], req_line[0]};
 
   // Four words to a qword, low word first.
