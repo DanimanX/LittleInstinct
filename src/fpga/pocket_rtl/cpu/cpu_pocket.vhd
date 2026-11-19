@@ -1967,6 +1967,17 @@ begin
       signal ps_mask  : std_logic_vector(7 downto 0) := (others => '0');
       signal ps_cnt   : unsigned(15 downto 0) := (others => '0');
       signal ps_64    : std_logic := '0';
+      -- V212: V211 saw no CPU store of any 8808xxFC value, yet object 6
+      -- (0808C200) read 8808C1FC from a hit. Did a refill bring it from
+      -- SDRAM? clk1x side: the first fill whose beat 0 is word 0 of an
+      -- object (line 0 of 0808BC00..0808DB00) with byte 0 > 32.
+      signal f_line   : unsigned(31 downto 0) := (others => '0');
+      signal f_beat   : unsigned(1 downto 0) := (others => '0');
+      signal fb_valid : std_logic := '0';
+      signal fb_addr  : std_logic_vector(31 downto 0) := (others => '0');
+      signal fb_data  : std_logic_vector(63 downto 0) := (others => '0');
+      signal fo_cnt   : unsigned(15 downto 0) := (others => '0');
+      signal fo_bad   : unsigned(7 downto 0) := (others => '0');
       signal ob_cnt   : unsigned(7 downto 0) := (others => '0');
       -- V209: V208 saw no store of a mode > 32 (126 stores, last 02), yet
       -- the dispatcher's `lbu a2,0(fp)` at 88002060 (fp = 8808BC00) got
@@ -2280,8 +2291,11 @@ begin
       -- V211: S2 = first pattern store's PC, S3 = its data, row 8 tail =
       -- its address, row 9 tail = {mask, 7 zeros & 64-bit, count}, row 10
       -- tail = bad load address, row 12 tail = the bad load's cache word.
+      -- V212: S2 = bad fill's beat [31:0], S3 = [63:32], row 8 tail = its
+      -- line, row 9 tail = {bad fills, 0, fills of an object's line 0},
+      -- row 10 tail = bad load address, row 12 tail = the bad load's word.
       debug_stack_probe1 <= x_dc(31 downto 0);
-      debug_stack_probe2 <= ps_pc;
+      debug_stack_probe2 <= fb_data(31 downto 0);
       -- V187 screen, all frozen with the rest at the fault departure:
       --   S3  (row 11)       intruder's address if FL[10], else the V185 slot
       --   FL[11:8]           armed, intruder seen, site (0 = E528, 1 = E5D4),
@@ -2290,15 +2304,15 @@ begin
       --   EX tail (row 8)    the delay-slot load's ADDRESS (sp'+44+4*index)
       --   S2 tail (row 6)    the delay-slot load's DATA (compare with S2)
       --   BV tail (row 9)    the intruder's PC, 0 if none
-      debug_stack_probe3 <= ps_data;
+      debug_stack_probe3 <= fb_data(63 downto 32);
       debug_stack_probe4 <= rp_rflword;
       debug_stack_flags  <= armed & l_hit & c_site & c_hit &
                             rp_vflags(7 downto 0);
-      debug_array_addr   <= ps_addr;
+      debug_array_addr   <= fb_addr;
       debug_array_data   <= c_data;
       -- V189: with no intruder, the row-9 tail is {sectors checked, checksum
       -- mismatches}, both saturating, both live.
-      debug_array_pc     <= ps_mask & "0000000" & ps_64 & std_logic_vector(ps_cnt);  -- V211
+      debug_array_pc     <= std_logic_vector(fo_bad) & x"00" & std_logic_vector(fo_cnt);  -- V212
 
       process (clk93)
       begin
@@ -2467,6 +2481,34 @@ begin
                   end if;
                end if;
              end if;
+            end if;
+         end if;
+      end process;
+      -- V212: fills of an object's line 0 (clk1x, where the fill beats are).
+      -- Frozen values are read by the overlay long after; quasi-static.
+      process (clk1x)
+      begin
+         if rising_edge(clk1x) then
+            if (datacache_request = '1') then
+               f_line <= datacache_reqAddr;
+               f_beat <= (others => '0');
+            end if;
+            if (datacache_active = '1' and dc_ready = '1') then
+               f_beat <= f_beat + 1;
+               if (f_beat = "00" and
+                   f_line(27 downto 16) = x"808" and
+                   f_line(15 downto 8) >= x"BC" and f_line(15 downto 8) <= x"DB" and
+                   f_line(7 downto 5) = "000") then
+                  if (fo_cnt /= x"FFFF") then fo_cnt <= fo_cnt + 1; end if;
+                  if (unsigned(dc_dout(7 downto 0)) > 32) then
+                     if (fo_bad /= x"FF") then fo_bad <= fo_bad + 1; end if;
+                     if (fb_valid = '0') then
+                        fb_valid <= '1';
+                        fb_addr  <= std_logic_vector(f_line);
+                        fb_data  <= dc_dout;
+                     end if;
+                  end if;
+               end if;
             end if;
          end if;
       end process;
