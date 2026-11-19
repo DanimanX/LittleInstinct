@@ -1311,6 +1311,7 @@ wire        controller_fast_valid;
 
 ki_cpu_core #(
 	.DEBUG_TRACE(DEBUG_TRACE),
+	.PERF_CENSUS(1),
 	// clk_cpu and clk_core are both 50 MHz out of one PLL (see pll_0002.v), not
 	// the 100:50 of the MiSTer build SYNC_CROSSING was written for. The
 	// crossing must therefore go back through its two-flop synchronisers:
@@ -1822,9 +1823,9 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
 	.both_held(dbg_chord_held)
 );
 
-// V216: Select + Fierce Kick (R trigger) cycles the debug page: 0 status,
-// 2 per-game-frame stall census, 3 PC profile, back to 0. Page 1 (trace)
-// is skipped: its bus is not wired on the Pocket.
+// V216: Select + Fierce Kick (R trigger) toggles the debug page between 0
+// (status) and 2 (per-game-frame stall census). Pages 1 (trace) and 3 (PC
+// profile) are not wired on the Pocket: they do not fit.
 wire page_chord_pulse;
 ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) page_chord (
 	.clk      (clk_core),
@@ -1839,8 +1840,7 @@ always @(posedge clk_core) begin
 	if (shell_reset)
 		dbg_page <= 2'd0;
 	else if (page_chord_pulse)
-		dbg_page <= (dbg_page == 2'd0) ? 2'd2 :
-		            (dbg_page == 2'd2) ? 2'd3 : 2'd0;
+		dbg_page <= (dbg_page == 2'd0) ? 2'd2 : 2'd0;
 end
 
 // Repurposed status-page fields, all of which were wired to constants before.
@@ -2004,8 +2004,10 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.page(dbg_page),
 		.perf(debug_perf_bus_sync),
 		.perf_worst(debug_perf_worst_sync),
-		.perf_prof(debug_perf_prof_sync),
-		.prof_fine_base(debug_prof_fine_sync),
+		// V217: the PC profile does not fit beside the census (1853 of 1848
+		// LABs); left unread so its counters are pruned.
+		.perf_prof(336'd0),
+		.prof_fine_base(3'd0),
 		.trace_bus(896'd0),
 		.trace_valid(1'b0),
 		.bist_done(bist_done),

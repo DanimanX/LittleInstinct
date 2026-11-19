@@ -12,6 +12,9 @@ entity ki_cpu_core is
       -- instantiation is in KillerInstinct.sv and Quartus will not convert a
       -- SystemVerilog bit into a VHDL boolean. Converted below.
       DEBUG_TRACE    : integer := 1;
+      -- The per-frame census and PC profile alone, without the trace. They
+      -- only need debug_perf_events, which cpu.vhd drives in every build.
+      PERF_CENSUS    : integer := 0;
       -- Base of the PROF page's 256 KB window; must be 256 KB aligned, since
       -- the buckets are absolute address bits 17:15 and 14:12. Hardware uses
       -- the default. A bench running its own program elsewhere has to move
@@ -460,7 +463,7 @@ begin
 
    debug_retired <= debug_retired_i;
 
-   gperf : if DEBUG_TRACE /= 0 generate
+   gperf : if DEBUG_TRACE /= 0 or PERF_CENSUS /= 0 generate
       signal retired_prev : unsigned(31 downto 0) := (others => '0');
       signal retired_cnt  : unsigned(23 downto 0) := (others => '0');
       -- The slowest frame's CY: the second block's key.
@@ -728,7 +731,7 @@ begin
       end process;
    end generate gperf;
 
-   gperf_off : if DEBUG_TRACE = 0 generate
+   gperf_off : if DEBUG_TRACE = 0 and PERF_CENSUS = 0 generate
       debug_perf_bus   <= (others => '0');
       debug_perf_worst <= (others => '0');
       debug_perf_prof  <= (others => '0');
