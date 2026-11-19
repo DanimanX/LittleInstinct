@@ -1947,6 +1947,18 @@ begin
       -- V208: the first store that puts a mode > 32 into byte 0.
       signal bs_valid : std_logic := '0';
       signal bs_pc, bs_data : std_logic_vector(31 downto 0) := (others => '0');
+      -- V209: V208 saw no store of a mode > 32 (126 stores, last 02), yet
+      -- the dispatcher's `lbu a2,0(fp)` at 88002060 (fp = 8808BC00) got
+      -- 0xFC from a zero-cycle hit. Stage 4's result mux takes the cache's
+      -- data only when writeback_UseCache or datacache_readena; otherwise
+      -- mem_finished_dataRot, the last uncached read. Every ce cycle the
+      -- inputs of that mux are sampled (p_*); the a2 writeback one cycle
+      -- later sees the edge that loaded writebackData, so the bad load
+      -- freezes exactly what the mux saw (x_*).
+      signal p_dc, x_dc     : std_logic_vector(63 downto 0) := (others => '0');
+      signal p_mf, x_mf     : std_logic_vector(31 downto 0) := (others => '0');
+      signal p_addr, x_addr : std_logic_vector(31 downto 0) := (others => '0');
+      signal p_fl, x_fl     : std_logic_vector(31 downto 0) := (others => '0');
       -- V207: the dispatcher's mode-byte load (8802205C `lbu a2,0(fp)`,
       -- fp = 88084400). V206: nothing but the boot ROM ever stored to that
       -- word (value 3), yet V205's crash read 0xFC there - ~0x03. So: the
@@ -2235,10 +2247,13 @@ begin
       -- store of a mode > 32 (PC), row 10 tail = its data, row 9 tail = the
       -- first bad load's D-cache states, row 12 tail = {stores (8b), bad
       -- load byte, bad load cycles, 7 zeros & bad load seen}.
-      debug_stack_probe0 <= bs_data;
+      -- V209: S2 (row 6) = cache data_out[63:32], S3 (row 11) = [31:0],
+      -- row 8 tail = mem_finished_dataRot[31:0], row 10 tail = read4_Addr,
+      -- row 9 tail = mux flags (see p_fl), row 12 tail as V208.
+      debug_stack_probe0 <= x_addr;
       debug_stack_probe1 <= std_logic_vector(w_cnt(7 downto 0)) & bad_val(7 downto 0) &
                             std_logic_vector(bad_cyc) & "0000000" & bad_valid;
-      debug_stack_probe2 <= w1_pc;
+      debug_stack_probe2 <= x_dc(63 downto 32);
       -- V187 screen, all frozen with the rest at the fault departure:
       --   S3  (row 11)       intruder's address if FL[10], else the V185 slot
       --   FL[11:8]           armed, intruder seen, site (0 = E528, 1 = E5D4),
@@ -2247,15 +2262,15 @@ begin
       --   EX tail (row 8)    the delay-slot load's ADDRESS (sp'+44+4*index)
       --   S2 tail (row 6)    the delay-slot load's DATA (compare with S2)
       --   BV tail (row 9)    the intruder's PC, 0 if none
-      debug_stack_probe3 <= w1_data;
+      debug_stack_probe3 <= x_dc(31 downto 0);
       debug_stack_probe4 <= rp_rflword;
       debug_stack_flags  <= armed & l_hit & c_site & c_hit &
                             rp_vflags(7 downto 0);
-      debug_array_addr   <= bs_pc;
+      debug_array_addr   <= x_mf;
       debug_array_data   <= c_data;
       -- V189: with no intruder, the row-9 tail is {sectors checked, checksum
       -- mismatches}, both saturating, both live.
-      debug_array_pc     <= bad_states;  -- V208
+      debug_array_pc     <= x_fl;  -- V209
 
       process (clk93)
       begin
@@ -2265,6 +2280,20 @@ begin
                cnt_bad <= (others => '0');
                d_first <= '0';
             else
+             -- V209: the stage-4 result mux's inputs, every ce cycle.
+             if (ce_93 = '1') then
+               p_dc   <= datacache_data_out;
+               p_mf   <= mem_finished_dataRot(31 downto 0);
+               p_addr <= std_logic_vector(read4_Addr);
+               p_fl   <= writeback_UseCache & datacache_readena & datacache_readdone &
+                         mem_finished_read & stall4 & writeback_fifoStall &
+                         writebackMemWrite & executeMergeFwd &
+                         "000" & datacache_debug_state &
+                         lb_states(7 downto 0) &
+                         "0000000" & lb_track;
+               -- bit 1: the read is a byte load (bit 0 = lb_track).
+               if (read4_useLoadType = LOADTYPE_BYTE) then p_fl(1) <= '1'; end if;
+             end if;
              -- V207 load tracking (every ce cycle).
              if (ce_93 = '1' and lb_track = '1') then
                if (lb_cyc /= x"FF") then lb_cyc <= lb_cyc + 1; end if;
@@ -2281,6 +2310,7 @@ begin
                      bad_valid  <= '1';
                      bad_val    <= std_logic_vector(writebackData(31 downto 0));
                      bad_states <= lb_states; bad_cyc <= lb_cyc;
+                     x_dc <= p_dc; x_mf <= p_mf; x_addr <= p_addr; x_fl <= p_fl;
                   end if;
                end if;
              end if;
