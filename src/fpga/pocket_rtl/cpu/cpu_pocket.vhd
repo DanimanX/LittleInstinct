@@ -1947,6 +1947,17 @@ begin
       -- V208: the first store that puts a mode > 32 into byte 0.
       signal bs_valid : std_logic := '0';
       signal bs_pc, bs_data : std_logic_vector(31 downto 0) := (others => '0');
+      -- V210: 88002060 is not one mode byte but the head of a loop over 32
+      -- objects of 256 bytes from 8808BC00 (gp = index, fp += 256 at
+      -- 880021D0). V209's bad lbu read object 10 (0808C600), whose first
+      -- word held 8808C5FC. So the watch now covers word 0 of every object:
+      -- phys 0808BC00..0808DBFF with addr[7:2] = 0. bs_* = first store that
+      -- leaves byte 0 > 32 (PC, data, address, mask); o_cnt = all stores to
+      -- those words, ob_cnt = the bad ones.
+      signal bs_addr  : std_logic_vector(31 downto 0) := (others => '0');
+      signal bs_mask  : std_logic_vector(7 downto 0) := (others => '0');
+      signal o_cnt    : unsigned(15 downto 0) := (others => '0');
+      signal ob_cnt   : unsigned(7 downto 0) := (others => '0');
       -- V209: V208 saw no store of a mode > 32 (126 stores, last 02), yet
       -- the dispatcher's `lbu a2,0(fp)` at 88002060 (fp = 8808BC00) got
       -- 0xFC from a zero-cycle hit. Stage 4's result mux takes the cache's
@@ -2250,10 +2261,15 @@ begin
       -- V209: S2 (row 6) = cache data_out[63:32], S3 (row 11) = [31:0],
       -- row 8 tail = mem_finished_dataRot[31:0], row 10 tail = read4_Addr,
       -- row 9 tail = mux flags (see p_fl), row 12 tail as V208.
+      -- V210: S2 (row 6) = first bad object store's PC, S3 (row 11) = its
+      -- data, row 8 tail = its address, row 10 tail = the bad load's
+      -- address, row 9 tail = {mask, bad stores, all object-word-0 stores},
+      -- row 12 tail = {bad load's mux flags [31:24] (V209), bad byte,
+      -- bad load cycles, 7 zeros & bad load seen}.
       debug_stack_probe0 <= x_addr;
-      debug_stack_probe1 <= std_logic_vector(w_cnt(7 downto 0)) & bad_val(7 downto 0) &
+      debug_stack_probe1 <= x_fl(31 downto 24) & bad_val(7 downto 0) &
                             std_logic_vector(bad_cyc) & "0000000" & bad_valid;
-      debug_stack_probe2 <= x_dc(63 downto 32);
+      debug_stack_probe2 <= bs_pc;
       -- V187 screen, all frozen with the rest at the fault departure:
       --   S3  (row 11)       intruder's address if FL[10], else the V185 slot
       --   FL[11:8]           armed, intruder seen, site (0 = E528, 1 = E5D4),
@@ -2262,15 +2278,15 @@ begin
       --   EX tail (row 8)    the delay-slot load's ADDRESS (sp'+44+4*index)
       --   S2 tail (row 6)    the delay-slot load's DATA (compare with S2)
       --   BV tail (row 9)    the intruder's PC, 0 if none
-      debug_stack_probe3 <= x_dc(31 downto 0);
+      debug_stack_probe3 <= bs_data;
       debug_stack_probe4 <= rp_rflword;
       debug_stack_flags  <= armed & l_hit & c_site & c_hit &
                             rp_vflags(7 downto 0);
-      debug_array_addr   <= x_mf;
+      debug_array_addr   <= bs_addr;
       debug_array_data   <= c_data;
       -- V189: with no intruder, the row-9 tail is {sectors checked, checksum
       -- mismatches}, both saturating, both live.
-      debug_array_pc     <= x_fl;  -- V209
+      debug_array_pc     <= bs_mask & std_logic_vector(ob_cnt) & std_logic_vector(o_cnt);  -- V210
 
       process (clk93)
       begin
@@ -2368,6 +2384,24 @@ begin
                   lb_cyc    <= (others => '0');
                   lb_states <= (others => '0');
                end if;
+               -- V210: word 0 of any of the 32 objects (0808BC00..0808DB00).
+               if (ff_valid = '0' and executeMemWriteEnable = '1' and
+                   executeMemAddress(31 downto 16) = x"0808" and
+                   unsigned(executeMemAddress(15 downto 8)) >= 16#BC# and
+                   unsigned(executeMemAddress(15 downto 8)) <= 16#DB# and
+                   executeMemAddress(7 downto 2) = "000000") then
+                  if (o_cnt /= x"FFFF") then o_cnt <= o_cnt + 1; end if;
+                  if (executeMemWriteMask(0) = '1' and
+                      unsigned(executeMemWriteData(7 downto 0)) > 32) then
+                     if (ob_cnt /= x"FF") then ob_cnt <= ob_cnt + 1; end if;
+                     if (bs_valid = '0') then
+                        bs_valid <= '1'; bs_pc <= prof_pc2;
+                        bs_data  <= std_logic_vector(executeMemWriteData(31 downto 0));
+                        bs_addr  <= std_logic_vector(executeMemAddress);
+                        bs_mask  <= executeMemWriteMask;
+                     end if;
+                  end if;
+               end if;
                if (ff_valid = '0' and executeMemWriteEnable = '1' and
                    executeMemAddress(31 downto 2) = "000010000000100010111100000000") then  -- V208: 8808BC00 (fp in 88002038)
                   w2_pc   <= w1_pc;   w2_data <= w1_data;
@@ -2375,11 +2409,6 @@ begin
                   w1_data <= std_logic_vector(executeMemWriteData(31 downto 0));
                   w1_mask <= executeMemWriteMask;
                   if (w_cnt /= x"FFFFFF") then w_cnt <= w_cnt + 1; end if;
-                  if (bs_valid = '0' and executeMemWriteMask(0) = '1' and
-                      unsigned(executeMemWriteData(7 downto 0)) > 32) then
-                     bs_valid <= '1'; bs_pc <= prof_pc2;
-                     bs_data  <= std_logic_vector(executeMemWriteData(31 downto 0));
-                  end if;
                end if;
                if (prof_pc2 = x"8802DC58") then
                   if (executeMemAddress = x"08500FF8") then
