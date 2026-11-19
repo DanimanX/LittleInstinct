@@ -1957,6 +1957,16 @@ begin
       signal bs_addr  : std_logic_vector(31 downto 0) := (others => '0');
       signal bs_mask  : std_logic_vector(7 downto 0) := (others => '0');
       signal o_cnt    : unsigned(15 downto 0) := (others => '0');
+      -- V211: V210 saw 503 stores to the objects' word 0, none bad, yet
+      -- object 3 then read 0xFC from a cache hit - V209's object 10 held
+      -- 8808C5FC = its own address - 4. So: the first store ANYWHERE whose
+      -- data (either 32-bit half) is 8808xxFC inside the table
+      -- (8808BBFC..8808DBFC); if it went to obj-4, the cache moved it.
+      signal ps_valid : std_logic := '0';
+      signal ps_pc, ps_data, ps_addr : std_logic_vector(31 downto 0) := (others => '0');
+      signal ps_mask  : std_logic_vector(7 downto 0) := (others => '0');
+      signal ps_cnt   : unsigned(15 downto 0) := (others => '0');
+      signal ps_64    : std_logic := '0';
       signal ob_cnt   : unsigned(7 downto 0) := (others => '0');
       -- V209: V208 saw no store of a mode > 32 (126 stores, last 02), yet
       -- the dispatcher's `lbu a2,0(fp)` at 88002060 (fp = 8808BC00) got
@@ -2267,9 +2277,11 @@ begin
       -- row 12 tail = {bad load's mux flags [31:24] (V209), bad byte,
       -- bad load cycles, 7 zeros & bad load seen}.
       debug_stack_probe0 <= x_addr;
-      debug_stack_probe1 <= x_fl(31 downto 24) & bad_val(7 downto 0) &
-                            std_logic_vector(bad_cyc) & "0000000" & bad_valid;
-      debug_stack_probe2 <= bs_pc;
+      -- V211: S2 = first pattern store's PC, S3 = its data, row 8 tail =
+      -- its address, row 9 tail = {mask, 7 zeros & 64-bit, count}, row 10
+      -- tail = bad load address, row 12 tail = the bad load's cache word.
+      debug_stack_probe1 <= x_dc(31 downto 0);
+      debug_stack_probe2 <= ps_pc;
       -- V187 screen, all frozen with the rest at the fault departure:
       --   S3  (row 11)       intruder's address if FL[10], else the V185 slot
       --   FL[11:8]           armed, intruder seen, site (0 = E528, 1 = E5D4),
@@ -2278,15 +2290,15 @@ begin
       --   EX tail (row 8)    the delay-slot load's ADDRESS (sp'+44+4*index)
       --   S2 tail (row 6)    the delay-slot load's DATA (compare with S2)
       --   BV tail (row 9)    the intruder's PC, 0 if none
-      debug_stack_probe3 <= bs_data;
+      debug_stack_probe3 <= ps_data;
       debug_stack_probe4 <= rp_rflword;
       debug_stack_flags  <= armed & l_hit & c_site & c_hit &
                             rp_vflags(7 downto 0);
-      debug_array_addr   <= bs_addr;
+      debug_array_addr   <= ps_addr;
       debug_array_data   <= c_data;
       -- V189: with no intruder, the row-9 tail is {sectors checked, checksum
       -- mismatches}, both saturating, both live.
-      debug_array_pc     <= bs_mask & std_logic_vector(ob_cnt) & std_logic_vector(o_cnt);  -- V210
+      debug_array_pc     <= ps_mask & "0000000" & ps_64 & std_logic_vector(ps_cnt);  -- V211
 
       process (clk93)
       begin
@@ -2383,6 +2395,30 @@ begin
                   lb_track  <= '1';
                   lb_cyc    <= (others => '0');
                   lb_states <= (others => '0');
+               end if;
+               -- V211: any store of a table pointer ending in FC.
+               if (ff_valid = '0' and executeMemWriteEnable = '1' and
+                   ((executeMemWriteData(31 downto 16) = x"8808" and
+                     executeMemWriteData(7 downto 0) = x"FC" and
+                     unsigned(executeMemWriteData(15 downto 8)) >= 16#BB# and
+                     unsigned(executeMemWriteData(15 downto 8)) <= 16#DB#) or
+                    (executeMem64Bit = '1' and
+                     executeMemWriteData(63 downto 48) = x"8808" and
+                     executeMemWriteData(39 downto 32) = x"FC" and
+                     unsigned(executeMemWriteData(47 downto 40)) >= 16#BB# and
+                     unsigned(executeMemWriteData(47 downto 40)) <= 16#DB#))) then
+                  if (ps_cnt /= x"FFFF") then ps_cnt <= ps_cnt + 1; end if;
+                  if (ps_valid = '0') then
+                     ps_valid <= '1'; ps_pc <= prof_pc2;
+                     ps_addr  <= std_logic_vector(executeMemAddress);
+                     ps_mask  <= executeMemWriteMask; ps_64 <= executeMem64Bit;
+                     if (executeMemWriteData(31 downto 16) = x"8808" and
+                         executeMemWriteData(7 downto 0) = x"FC") then
+                        ps_data <= std_logic_vector(executeMemWriteData(31 downto 0));
+                     else
+                        ps_data <= std_logic_vector(executeMemWriteData(63 downto 32));
+                     end if;
+                  end if;
                end if;
                -- V210: word 0 of any of the 32 objects (0808BC00..0808DB00).
                if (ff_valid = '0' and executeMemWriteEnable = '1' and
