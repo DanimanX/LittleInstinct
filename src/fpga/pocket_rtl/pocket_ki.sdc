@@ -85,3 +85,11 @@ set_false_path -to [get_keepers {*|debug_dep_pc_hold[*]}]
 set_false_path -to [get_keepers {*|debug_dep_op_hold[*]}]
 set_false_path -to [get_keepers {*|debug_dep_trig_hold[*]}]
 set_false_path -to [get_keepers {*|debug_dep_cause_hold[*]}]
+
+# ---- debug overlay glyph path (V218) -------------------------------------------
+# h_count/v_count advance once per 8 clk_core cycles (6.25 MHz pixel enable)
+# and the overlay's snapshots once per frame, so the glyph lookup into the
+# registered overlay colour has 4 clocks. A source that changes mid-window
+# costs one debug pixel for one frame, nothing else.
+set_multicycle_path -setup -end 4 -to [get_keepers {*g_overlays.debug_red_q[*] *g_overlays.debug_green_q[*] *g_overlays.debug_blue_q[*]}]
+set_multicycle_path -hold  -end 3 -to [get_keepers {*g_overlays.debug_red_q[*] *g_overlays.debug_green_q[*] *g_overlays.debug_blue_q[*]}]

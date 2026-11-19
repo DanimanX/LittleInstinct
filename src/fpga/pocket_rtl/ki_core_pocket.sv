@@ -1318,7 +1318,12 @@ ki_cpu_core #(
 	// reading the other domain's raw register across a 250 ps offset lost
 	// responses in the return FIFO, and the boot ROM's cache-flush lw at
 	// 0xBFC00400 never saw its mem_done. That is the black screen.
-	.SYNC_CROSSING(0),
+	// V218: since v1.1.0 clk_cpu and clk_core are the SAME net (CLK_50M
+	// above), so the 250 ps offset that forced the synchronisers is gone and
+	// every crossing path is an ordinary single-clock path Quartus times.
+	// The synchronisers only added latency to every miss (V217 census: ~43
+	// CPU cycles per D-cache miss, ~45% of each game frame).
+	.SYNC_CROSSING(1),
 	.DCACHE_SKIP_FILL(0),
 	.DCACHE_FB_PARTIAL(0),
 	.DCACHE_WB_EARLY(0),
@@ -1806,6 +1811,12 @@ wire [31:0] debug_restart_info =
 wire [7:0] debug_red;
 wire [7:0] debug_green;
 wire [7:0] debug_blue;
+// V218: the overlay's glyph path is registered before the video mux. At 97%
+// ALMs it had become the core clock's worst path (-0.161 ns to v_rgb); one
+// 50 MHz clock is an eighth of a 6.25 MHz pixel, invisible.
+wire [7:0] debug_red_c;
+wire [7:0] debug_green_c;
+wire [7:0] debug_blue_c;
 
 // Start + Select. The ids in input.json are id 10 = 1P Start, id 11 = Insert
 // Coin (the Pocket's Select button), so those are the bits to watch. The old
@@ -2017,10 +2028,19 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.bist_first_bad_actual(bist_first_bad_actual),
 		.boot_state(boot_state),
 		.sdram_ready(sdram_ready),
-		.red(debug_red),
-		.green(debug_green),
-		.blue(debug_blue)
+		.red(debug_red_c),
+		.green(debug_green_c),
+		.blue(debug_blue_c)
 	);
+	reg [7:0] debug_red_q, debug_green_q, debug_blue_q;
+	always @(posedge clk_core) begin
+		debug_red_q   <= debug_red_c;
+		debug_green_q <= debug_green_c;
+		debug_blue_q  <= debug_blue_c;
+	end
+	assign debug_red   = debug_red_q;
+	assign debug_green = debug_green_q;
+	assign debug_blue  = debug_blue_q;
 end else begin : g_no_overlays
 	// Release: nothing renders. The video mux below folds these constants
 	// away, so neither overlay nor the registers feeding them are built.
