@@ -1574,6 +1574,7 @@ architecture arch of cpu is
    signal datacache_wbe                : std_logic_vector(7 downto 0);
    signal datacache_wdata              : std_logic_vector(63 downto 0);
    signal datacache_writedone          : std_logic;
+   signal datacache_writetaken         : std_logic;
    signal datacache_CmdStall           : std_logic;
    signal datacache_perf_miss          : std_logic;
    signal datacache_perf_miss_low      : std_logic;
@@ -6162,6 +6163,7 @@ begin
       write_be          => datacache_wbe,
       write_data        => datacache_wdata,
       write_done        => datacache_writedone,
+      write_taken       => datacache_writetaken,
       
       CacheCommandEna   => cache_commandEnableD,
       CacheCommand      => executeCacheCommand,
@@ -6681,7 +6683,12 @@ begin
                         -- only the half still pending; a second cache write
                         -- re-raised write_done under the NEXT instruction and
                         -- released a load's stage-4 wait (V190: a1 lost).
-                        fifoStall_useCache  <= executeMemUseCache and not datacache_writedone;
+                        -- V214: nor when the cache took it without
+                        -- write_done (a write-through miss with the FIFO
+                        -- blocked): the replay comes with the next
+                        -- instruction's index in the cache (V213).
+                        fifoStall_useCache  <= executeMemUseCache and not datacache_writedone and
+                                               not datacache_writetaken;
                      else
                         writebackNew        <= '1';
                      end if;

@@ -137,6 +137,10 @@ entity cpu_datacache is
       write_be          : in  std_logic_vector(7 downto 0);
       write_data        : in  std_logic_vector(63 downto 0);
       write_done        : out  std_logic;
+      -- V214: the cache took this cycle's store in IDLE and owes nothing
+      -- more for it: a hit is written now, a write-through miss allocates
+      -- nothing, a write-back miss finishes it from its own fill.
+      write_taken       : out  std_logic;
       
       CacheCommandEna   : in  std_logic;
       CacheCommand      : in  unsigned(4 downto 0);
@@ -769,6 +773,7 @@ architecture arch of cpu_datacache is
    signal tail_next_miss : std_logic := '0';
    signal tail_hit       : std_logic;
    signal tail_blk       : std_logic;
+   signal idx_ok         : std_logic;
    signal tail_go        : std_logic;
    signal fill_beat_seen : std_logic := '0';
    signal perf_miss_i    : std_logic;
@@ -1058,11 +1063,23 @@ begin
 
       tag_w(w)      <= tag_newData(w) when (tag_newEna(w) = '1') else tag_q_b(w);
       line_hit_w(w) <= '1' when (unsigned(tag_w(w)(19 downto TAG_LO)) = RW_addr(31 downto IDX_HI + 1) and
-                                 tag_w(w)(20) = '1') else '0';
+                                 tag_w(w)(20) = '1' and idx_ok = '1') else '0';
       qabs_w(w)     <= '0' when (not SKIP_FILL) else
                        tag_w(w)(22 + to_integer(RW_addr(4 downto 3)));
       hit_w(w)      <= line_hit_w(w) and ((not qabs_w(w)) or store_ok);
    end generate;
+
+   -- V214: the tags and the data port are indexed by tag_addr_1, latched
+   -- from stage 3's address as it entered. A store re-offered later
+   -- (cpu.vhd's write-through FIFO replay) comes with its own RW_addr while
+   -- tag_addr_1 is already the NEXT instruction's: comparing its tag with
+   -- that set gave a false hit and wrote the store into another line (V213:
+   -- 8808BEFC for 0808BEF8 landed in 0808BF00). Bits 11..3 are below the
+   -- page, so a TLB translation of RW_addr never changes them.
+   idx_ok     <= '0' when (write_ena = '1' and
+                           tag_addr_1(11 downto 3) /= RW_addr(11 downto 3)) else '1';
+   write_taken <= '1' when (state = IDLE and write_ena = '1' and tail_blk = '0' and
+                            idx_ok = '1') else '0';
 
    line_hit   <= line_hit_w(0) or line_hit_w(1);
    read_hit   <= hit_w(0) or hit_w(1);
