@@ -1822,6 +1822,27 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) dbg_chord (
 	.both_held(dbg_chord_held)
 );
 
+// V216: Select + Fierce Kick (R trigger) cycles the debug page: 0 status,
+// 2 per-game-frame stall census, 3 PC profile, back to 0. Page 1 (trace)
+// is skipped: its bus is not wired on the Pocket.
+wire page_chord_pulse;
+ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) page_chord (
+	.clk      (clk_core),
+	.reset    (shell_reset),
+	.start_i  (joystick_0[9]),
+	.select_i (joystick_0[11]),
+	.pulse    (page_chord_pulse),
+	.both_held()
+);
+reg [1:0] dbg_page = 2'd0;
+always @(posedge clk_core) begin
+	if (shell_reset)
+		dbg_page <= 2'd0;
+	else if (page_chord_pulse)
+		dbg_page <= (dbg_page == 2'd0) ? 2'd2 :
+		            (dbg_page == 2'd2) ? 2'd3 : 2'd0;
+end
+
 // Repurposed status-page fields, all of which were wired to constants before.
 //   row 5  DS -> RX  bytes handed to the ROM loader
 //   row 10 DP -> DO  the opcode that left the decompressed program
@@ -1895,7 +1916,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 	assign fps_box_pixel   = 1'b0;
 	assign fps_glyph_pixel = 1'b0;
 
-	ki_debug_screen debug_screen
+	ki_debug_screen #(.ENABLE_EXTRA_PAGES(1'b1)) debug_screen
 	(
 		.clk(clk_core),
 		.frame_start(frame_start),
@@ -1980,11 +2001,11 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// Page 1 is the frozen pre-event trace. It is fed from the clk_core
 		// shadow, not from the CPU domain directly, so what is on screen is a
 		// coherent capture rather than a live sample of a 736-bit bus.
-		.page(2'b00),
-		.perf(224'd0),
-		.perf_worst(224'd0),
-		.perf_prof(336'd0),
-		.prof_fine_base(3'd0),
+		.page(dbg_page),
+		.perf(debug_perf_bus_sync),
+		.perf_worst(debug_perf_worst_sync),
+		.perf_prof(debug_perf_prof_sync),
+		.prof_fine_base(debug_prof_fine_sync),
 		.trace_bus(896'd0),
 		.trace_valid(1'b0),
 		.bist_done(bist_done),
