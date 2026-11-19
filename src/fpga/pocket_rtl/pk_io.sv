@@ -40,6 +40,7 @@ module pk_io #(
 	input  wire        clk_74a,          // APF bridge clock
 	input  wire        apf_reset_n,
 	input  wire [31:0] bridge_addr,      // synchronous to clk_74a
+	input  wire        bridge_rd,
 	input  wire        bridge_wr,
 	input  wire [31:0] bridge_wr_data,
 
@@ -159,8 +160,14 @@ module pk_io #(
 	// 512-byte sector write buffer (128 x 32-bit words) for ATA sector writes (0x0184)
 	(* ramstyle = "M10K, no_rw_check" *)
 	reg [31:0] wr_buf [0:127];
+	// Latched on bridge_rd, as core_bridge_cmd does, NOT every cycle: during
+	// the host's 0x0184 burst bridge_addr has already moved on by the time it
+	// samples rd_data, so a free-running register handed it word k+1 for word
+	// k. Every ATA sector write landed one 32-bit word early (last word 0),
+	// its checksum at 500 instead of 504, and KI rebuilt the record forever.
 	always @(posedge clk_74a) begin
-		disk_bridge_rd_data <= wr_buf[bridge_addr[8:2]];
+		if (bridge_rd)
+			disk_bridge_rd_data <= wr_buf[bridge_addr[8:2]];
 	end
 
 	// ---------------------------------------------------------------- clk domain
@@ -217,7 +224,51 @@ module pk_io #(
 	reg        done_tog_74a = 1'b0;
 	reg [1:0]  tcmd_st = 2'd0;
 	reg [2:0]  tcmd_err = 3'd0;
-	reg [23:0] tcmd_timeout = 24'd0;
+	// The target-command give-up is 2^27 clk_74a = 1.81 s, below the disk
+	// watchdog's 2.68 s. It was 113 ms (state 2) / 56 ms (state 1), and V197
+	// hit it twice in one boot on the VS screen, where the game reads fighter
+	// data and writes its audit records: the host was simply slower than
+	// that. A give-up does not cancel anything - core_bridge_cmd still runs
+	// the command, and done/ack then belong to it - so after one the next
+	// command's handshake read the old command's level, a write closed before
+	// the host had read wr_buf (the next write then overwrote it), and each
+	// one ended in a 2.68 s watchdog close with a partial bank: the freeze.
+	reg [27:0] tcmd_timeout = 28'd0;
+	// V194 instrumentation (debug only): how slow the APF host answers.
+	// lat_74a counts clk_74a from the command's issue to its done;
+	// lat_max_74a keeps the worst in units of 2^20 clocks (14.1 ms), and
+	// tcmd_to_cnt counts the 1.81 s give-ups in tcmd_st 2.
+	reg [27:0] lat_74a      = 28'd0;
+	reg [7:0]  lat_max_74a  = 8'd0;
+	reg [3:0]  tcmd_to_cnt  = 4'd0;
+	// V199 (debug only): the command of the LAST give-up - write?, did the
+	// host ever answer "bu" (ack), and its LBA.
+	reg        gu_wr  = 1'b0, gu_ack = 1'b0, ack_seen = 1'b0;
+	reg [17:0] gu_lba = 18'd0;
+	// V200 (debug only): how long the host REALLY takes, give-up or not:
+	// cmd_cnt runs from the issue of the oldest command still outstanding
+	// to the rise of target_dataslot_done; slow_max keeps the worst in
+	// 2^24-clock units (226 ms). cur/prev_wr: the last two commands were
+	// writes; cur_busy: done was low when the last one was issued (the one
+	// before it was still running in core_bridge_cmd).
+	reg [31:0] cmd_cnt = 32'd0;
+	reg        done_d  = 1'b0;
+	reg [7:0]  slow_max = 8'd0;
+	reg        cur_wr = 1'b0, prev_wr = 1'b0, cur_busy = 1'b0;
+	always @(posedge clk_74a) begin
+		done_d <= target_dataslot_done;
+		// Counts only while a command is outstanding (V200 also counted
+		// idle time, and its first sample was the ~11 s ROM load).
+		if (!target_dataslot_done && ~&cmd_cnt) cmd_cnt <= cmd_cnt + 32'd1;
+		if (tcmd_st == 2'd0 && req_sync_74a[2] != done_tog_74a) begin
+			cmd_cnt <= 32'd0;
+			prev_wr  <= cur_wr;
+			cur_wr   <= wr_sync_74a[1];
+			cur_busy <= ~target_dataslot_done;
+		end
+		if (target_dataslot_done && !done_d && cmd_cnt[31:24] > slow_max)
+			slow_max <= cmd_cnt[31:24];
+	end
 
 	// APF interact.json action write (0xF0000000 = Reset Core)
 	reg menu_reset_tog_74a = 1'b0;
@@ -232,7 +283,9 @@ module pk_io #(
 		wr_sync_74a  <= {wr_sync_74a[0], disk_is_write};
 		case (tcmd_st)
 		2'd0: begin
-			tcmd_timeout <= 24'd0;
+			tcmd_timeout <= 28'd0;
+			lat_74a      <= 28'd0;
+			ack_seen     <= 1'b0;
 			if (req_sync_74a[2] != done_tog_74a) begin
 				target_dataslot_read  <= ~wr_sync_74a[1];
 				target_dataslot_write <=  wr_sync_74a[1];
@@ -240,16 +293,28 @@ module pk_io #(
 			end
 		end
 		2'd1: begin
-			tcmd_timeout <= tcmd_timeout + 24'd1;
-			if (target_dataslot_ack || !target_dataslot_done || tcmd_timeout[22]) begin
+			tcmd_timeout <= tcmd_timeout + 28'd1;
+			if (~&lat_74a) lat_74a <= lat_74a + 28'd1;
+			if (target_dataslot_ack) ack_seen <= 1'b1;
+			if (target_dataslot_ack || !target_dataslot_done || tcmd_timeout[27]) begin
 				target_dataslot_read  <= 1'b0;
 				target_dataslot_write <= 1'b0;
 				tcmd_st               <= 2'd2;
 			end
 		end
 		2'd2: begin
-			tcmd_timeout <= tcmd_timeout + 24'd1;
-			if (target_dataslot_done || tcmd_timeout[23]) begin
+			if (!tcmd_timeout[27]) tcmd_timeout <= tcmd_timeout + 28'd1;
+			if (~&lat_74a) lat_74a <= lat_74a + 28'd1;
+			if (target_dataslot_done && lat_74a[27:20] > lat_max_74a)
+				lat_max_74a <= lat_74a[27:20];
+			if (target_dataslot_ack) ack_seen <= 1'b1;
+			if (!target_dataslot_done && tcmd_timeout[27]) begin
+				if (tcmd_to_cnt != 4'hF) tcmd_to_cnt <= tcmd_to_cnt + 4'd1;
+				gu_wr  <= wr_sync_74a[1];
+				gu_ack <= ack_seen | target_dataslot_ack;
+				gu_lba <= target_dataslot_slotoffset[26:9];
+			end
+			if (target_dataslot_done || tcmd_timeout[27]) begin
 				tcmd_err     <= target_dataslot_err;
 				done_tog_74a <= req_sync_74a[2];
 				tcmd_st      <= 2'd0;
@@ -277,6 +342,15 @@ module pk_io #(
 	localparam integer DISK_TIMEOUT_BIT = 27;
 	reg [DISK_TIMEOUT_BIT:0] disk_watchdog = {DISK_TIMEOUT_BIT+1{1'b0}};
 	reg        disk_timeout = 1'b0;
+	// V194: watchdog closes (saturating) and sd_rd raised while a batch is
+	// still active (ki_ata abandoned a fetch: a new READ or SRST overtook it).
+	reg [3:0]  wd_cnt      = 4'd0;
+	reg [7:0]  overrun_cnt = 8'd0;
+	reg        sd_rd_d     = 1'b0;
+	reg [7:0]  lat_max_m = 8'd0, lat_max_s = 8'd0;
+	reg [3:0]  tcmd_to_m = 4'd0, tcmd_to_s = 4'd0;
+	reg [19:0] gu_m = 20'd0, gu_s = 20'd0;   // V199 debug-only sync
+	reg [19:0] sl_m = 20'd0, sl_s = 20'd0;   // V200 debug-only sync
 
 	// The APF's end-of-transfer marker is a level in clk_74a. It is latched
 	// here and only acted on once the FIFO has stayed empty for a grace
@@ -348,6 +422,13 @@ module pk_io #(
 			if (loader_end_sync[1])
 				loader_end_latched <= 1'b1;
 
+			sd_rd_d   <= sd_rd;
+			lat_max_m <= lat_max_74a;  lat_max_s <= lat_max_m;   // debug-only sync
+			tcmd_to_m <= tcmd_to_cnt;  tcmd_to_s <= tcmd_to_m;
+			gu_m <= {gu_wr, gu_ack, gu_lba};  gu_s <= gu_m;   // quasi-static
+			sl_m <= {slow_max, prev_wr, cur_wr, cur_busy, gu_ack, gu_lba[7:0]};  sl_s <= sl_m;
+			if (sd_rd && !sd_rd_d && disk_active && overrun_cnt != 8'hFF)
+				overrun_cnt <= overrun_cnt + 8'd1;
 			if (disk_active)
 				disk_watchdog <= disk_watchdog + 1'b1;
 			else
@@ -479,7 +560,7 @@ module pk_io #(
 					// arrived, so the close is gated on the count and not on `done`
 					// alone. `done` is an APF LEVEL, not an acknowledgement: tcmd_st==2'd2
 					// (line 246) fires on a level left over from the previous transfer,
-					// or on tcmd_timeout[23] (113 ms at 74.25 MHz), and neither case can
+					// or on tcmd_timeout[27] (1.81 s at 74.25 MHz), and neither case can
 					// be told apart from a real completion here. ki_ata then marks the
 					// WHOLE batch valid from bank_count alone (ki_ata.sv:497) and hands
 					// the CPU sectors that were never written.
@@ -497,8 +578,10 @@ module pk_io #(
 					// Sticky: a timeout here means the APF stopped answering, and
 					// ki_ata will have accepted a partial bank as complete. Surface
 					// it on the debug page instead of letting it look like a game bug.
-					if (disk_watchdog[DISK_TIMEOUT_BIT])
+					if (disk_watchdog[DISK_TIMEOUT_BIT]) begin
 						disk_timeout <= 1'b1;
+						if (wd_cnt != 4'hF) wd_cnt <= wd_cnt + 4'd1;
+					end
 					sd_ack      <= 1'b0;
 					disk_active <= 1'b0;
 				end
@@ -628,19 +711,25 @@ module pk_io #(
 	// field, which is the only part of this word the page displays (the row
 	// shows bits 31:8). Its LSBs carried sd_lba[7:0], of which only seven bits
 	// were ever visible.
+	// V194: the DK field (bits 31:8 shown) is now four counters:
+	//   [31:28] watchdog closes (2.68 s, partial batch handed to ki_ata)
+	//   [27:24] 1.81 s target-command give-ups in tcmd_st 2
+	//   [23:16] worst APF command latency, issue -> done, x 14.1 ms
+	//   [15:8]  sd_rd raised while a batch was still active (fetch overrun)
+	//   [7:0]   sd_lba[7:0] (not shown)
+	// V200: [31:28] give-ups, [27:20] worst real host latency x 226 ms,
+	// [19:16] {prev cmd write, last cmd write, last issued while the bridge
+	// was busy, the given-up cmd was acked}, [15:8] given-up LBA[7:0].
+	// V201: [31:28] watchdog closes, [27:24] 1.81 s give-ups, [23:16] worst
+	// host latency x 226 ms (outstanding time only), [15:12] {disk_active,
+	// sd_rd, sd_ack, disk_is_write}, [11:8] pk_io state; [7:0] not shown.
 	assign debug_disk_info = {
-		disk_timeout,
-		tcmd_st,
-		tcmd_err,
-		target_dataslot_done,
-		target_dataslot_ack,
-		disk_active,
-		sd_rd,
-		sd_ack,
-		fifo_empty,
-		fifo_full,
-		disk_words_rem[11:0],
-		sd_lba[6:0]
+		wd_cnt,
+		tcmd_to_s,
+		sl_s[19:12],
+		disk_active, sd_rd, sd_ack, disk_is_write,
+		st,
+		sd_lba[7:0]
 	};
 
 	// Loader summary for the debug page. wr_addr counts bytes handed to the

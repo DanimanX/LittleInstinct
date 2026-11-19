@@ -72,6 +72,9 @@ module ki_debug_screen #(
   // from the setup value, [8] odd).
   input  wire  [31:0] array_addr,
   input  wire  [31:0] array_data,
+  // V187: PC of the intruding store into F_E4B0's frame (row 9 tail);
+  // 0 while no intruder was seen.
+  input  wire  [31:0] array_pc,
   input  wire  [31:0] cpu_prev_op,
   // Flags for the EE/EX/ET group on the status page:
   //   31:16  eret count, saturating
@@ -171,6 +174,7 @@ module ki_debug_screen #(
         stack_flags,
         array_addr,
         array_data,
+        array_pc,
         cpu_prev_op,
         cpu_ret_prev,
         cpu_eret_flags,
@@ -221,6 +225,7 @@ module ki_debug_screen #(
         stack_flags,
         array_addr,
         array_data,
+        array_pc,
         cpu_prev_op,
         cpu_ret_prev,
         cpu_eret_flags,
@@ -528,6 +533,7 @@ module ki_debug_screen #(
     logic [11:0] d_stack_flags;
     logic [31:0] d_array_addr;
     logic [31:0] d_array_data;
+    logic [31:0] d_array_pc;
     logic [31:0] d_cpu_prev_op;
     logic [31:0] d_cpu_ret_prev;
     logic [31:0] d_cpu_eret_flags;
@@ -572,6 +578,7 @@ module ki_debug_screen #(
         d_stack_flags,
         d_array_addr,
         d_array_data,
+        d_array_pc,
         d_cpu_prev_op,
         d_cpu_ret_prev,
         d_cpu_eret_flags,
@@ -604,7 +611,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="1"; 11: screen_char="8"; 12: screen_char="6";
+          10: screen_char="2"; 11: screen_char="0"; 12: screen_char="8";
           default: screen_char=" ";
         endcase
         1: case (column)
@@ -724,12 +731,9 @@ module ki_debug_screen #(
             else if (column == 2) screen_char=":";
             else if (column >= 3 && column <= 10)
               screen_char=hex32_ascii(d_stack_probe2, column-3);
-            // V186: this tail is now the DATA of the last store that landed
-            // inside the caller's pointer array. S4 was dropped: it captured
-            // whichever line shared the index and was already documented as
-            // unreliable. If this equals the garbage pointer the fault used,
-            // the overwrite is caught; if it equals the setup value
-            // (0x88500000), nothing overwrote and the fault is elsewhere.
+            // V187: the DATA the `lw a0,44(a0)` in F_E4B0's jal delay slot
+            // (8802E528 / 8802E5D4) returned. Equal to S2 = F_EC24 received
+            // what was loaded; different = the a0 got lost on the way in.
             else if (column >= 12 && column <= 19)
               screen_char=hex32_ascii(d_array_data, column-12);
           end else begin
@@ -805,8 +809,9 @@ module ki_debug_screen #(
           else if (column == 2) screen_char=":";
           else if (column >= 3 && column <= 10)
             screen_char=hex32_ascii(d_reset_info, column-3);
-          // V186: the ADDRESS of that last array store. Address - 4 is the
-          // array base, so two neighbouring slots name which entry was hit.
+          // V187: the ADDRESS of that delay-slot load, sp'+44+4*index. The
+          // healthy values are 08087238 / 0808723C; anything else means the
+          // index (or sp) was wrong.
           else if (column >= 12 && column <= 19)
             screen_char=hex32_ascii(d_array_addr, column-12);
         end
@@ -901,6 +906,12 @@ module ki_debug_screen #(
             screen_char = hex32_ascii(d_pcm_level[8] ? d_badvaddr
                                                      : d_bridge_info,
                                       column-3);
+          // V187: the PC of the store that landed in F_E4B0's frame from
+          // outside F_E4B0 (FL bit 10 set). V189: with no such store, the
+          // tail is CCCCBBBB - sectors checked (F_EC24 entries) and checksum
+          // mismatches (8802EC54), live and saturating.
+          else if (column >= 12 && column <= 19)
+            screen_char = hex32_ascii(d_array_pc, column-12);
         end
         10: begin
           // DO: the opcode ONE DECODE BEFORE the last PC in the program, which

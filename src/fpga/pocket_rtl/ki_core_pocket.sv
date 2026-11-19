@@ -15,6 +15,7 @@ module emu
 	// ---- Analogue Pocket side (this port's only change to the shell) ----
 	input         clk_74a,
 	input  [31:0] bridge_addr,
+	input         bridge_rd,
 	input         bridge_wr,
 	input  [31:0] bridge_wr_data,
 	input         dataslot_update,
@@ -279,6 +280,7 @@ pk_io #(.ROM_BYTES(4718592)) pk_io
 	.clk_74a                    (clk_74a),
 	.apf_reset_n                (pll_locked),
 	.bridge_addr                (bridge_addr),
+	.bridge_rd                  (bridge_rd),
 	.bridge_wr                  (bridge_wr),
 	.bridge_wr_data             (bridge_wr_data),
 	.dataslot_update            (dataslot_update),
@@ -716,6 +718,7 @@ wire  [31:0] debug_stack_probe4;
 wire  [11:0] debug_stack_flags;
 wire  [31:0] debug_array_addr;
 wire  [31:0] debug_array_data;
+wire  [31:0] debug_array_pc;
 // The row's 32 bits, as the screen shows them:
 //
 //   [31:27] bridge state (0 IDLE, 3/4 SDRAM read, 22/23 DCS, 24/25 video)
@@ -1394,6 +1397,7 @@ ki_cpu_core #(
 	.debug_stack_flags(debug_stack_flags),
 	.debug_array_addr(debug_array_addr),
 	.debug_array_data(debug_array_data),
+	.debug_array_pc(debug_array_pc),
 	.debug_ds_first(debug_cpu_ds_first),
 	.debug_eret_epc(debug_cpu_eret_epc),
 	.debug_eret_target(debug_cpu_eret_target),
@@ -1955,6 +1959,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		.stack_flags(debug_stack_flags),
 		.array_addr(debug_array_addr),
 		.array_data(debug_array_data),
+		.array_pc(debug_array_pc),
 		.bridge_counts(bridge_counts),
 		.adapter_counts(adapter_counts),
 		.ata_info(debug_dep_valid_sync ? debug_dep_pc_hold : debug_ata_info_sync),

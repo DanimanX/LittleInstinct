@@ -177,9 +177,12 @@ module ki_framebuffer (
     green = 8'h00;
     blue  = 8'h00;
     if (pixel_valid) begin
-      red   = {pixel[14:10], pixel[14:12]};
+      // BGR555: red in the low five bits. Commit 8321040 swapped this to
+      // RGB555 and the Pocket showed red as blue (character portraits, the
+      // fighters on the VS screen); green, alone in the middle, never moved.
+      red   = {pixel[4:0], pixel[4:2]};
       green = {pixel[9:5], pixel[9:7]};
-      blue  = {pixel[4:0], pixel[4:2]};
+      blue  = {pixel[14:10], pixel[14:12]};
     end
   end
 

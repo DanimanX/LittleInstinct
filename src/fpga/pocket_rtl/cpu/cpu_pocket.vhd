@@ -332,6 +332,7 @@ entity cpu is
       -- V186: who wrote the 3-entry pointer array. See g_stack_probe.
       debug_array_addr        : out std_logic_vector(31 downto 0) := (others => '0');
       debug_array_data        : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_array_pc          : out std_logic_vector(31 downto 0) := (others => '0');
       debug_trace_frozen      : out std_logic := '0';
       debug_trace_trigger     : in  std_logic := '0';
 
@@ -609,6 +610,21 @@ architecture arch of cpu is
    signal debug_prev_op_live           : std_logic_vector(31 downto 0) := (others => '0');
    signal debug_exc_cause_register     : std_logic_vector(7 downto 0) := (others => '0');
    signal debug_badvaddr_register      : std_logic_vector(31 downto 0) := (others => '0');
+   -- V203: EPC of the first departure (see the departure capture).
+   signal debug_dep_epc_register       : std_logic_vector(31 downto 0) := (others => '0');
+   -- V204: the game's FIRST non-interrupt exception, caught at the vector.
+   -- KI's handler (880266C8) answers any ExcCode /= 0 with
+   -- `ld sp,-8192(zero)`, which itself TLB-misses at FFFFE000 and lands in
+   -- the ROM - so the departure capture only ever saw that second fault.
+   signal ff_valid                     : std_logic := '0';
+   signal ff_epc, ff_bad               : std_logic_vector(31 downto 0) := (others => '0');
+   signal ff_cause                     : std_logic_vector(31 downto 0) := (others => '0');
+   -- V205: the two instructions decoded before that exception's vector
+   -- (pc1/op1 = the last one, pc2/op2 = the one before). V204 caught an AdEL
+   -- fetch at EPC = BadVAddr = 200A4451: a jump through a garbage register,
+   -- so one of these is the jr/jalr and the other its delay slot.
+   signal hist_pc1                     : std_logic_vector(31 downto 0) := (others => '0');
+   signal ff_pc1, ff_pc2, ff_op1, ff_op2 : std_logic_vector(31 downto 0) := (others => '0');
    signal cop0_debug_cause             : unsigned(31 downto 0);
    signal cop0_debug_epc               : unsigned(31 downto 0);
    signal cop0_debug_badvaddr          : unsigned(31 downto 0);
@@ -1550,6 +1566,8 @@ architecture arch of cpu is
    signal datacache_addr               : unsigned(31 downto 0);   
    signal datacache_data_out           : std_logic_vector(63 downto 0);   
    signal datacache_writeena           : std_logic;
+   signal datacache_wbe                : std_logic_vector(7 downto 0);
+   signal datacache_wdata              : std_logic_vector(63 downto 0);
    signal datacache_writedone          : std_logic;
    signal datacache_CmdStall           : std_logic;
    signal datacache_perf_miss          : std_logic;
@@ -1865,26 +1883,98 @@ begin
       signal rp_rflword : std_logic_vector(31 downto 0) := (others => '0');  -- S4
       signal rp_vflags  : std_logic_vector(7 downto 0)  := (others => '0');
 
-      -- V186: the 3-entry pointer array.
+      -- V187: F_E4B0's frame watch and the a0 load that feeds F_EC24.
       --
-      -- The board's a0 for F_EC24 was 0xB46D7A56, a word the image does not
-      -- contain, while the array's entries are built from a CONSTANT
-      -- (lui a0,0x8850 -> slot1 = 0x88500000, slot2 = 0x88500E00). A constant
-      -- cannot become garbage by itself, so a store wrote that stack slot
-      -- between the setup and the read. This finds it: learn the array base
-      -- from the setup store, then remember the last store inside it.
+      -- V186 on the board: the watch over the 3-entry pointer array armed
+      -- (base 0x08087234) and NO store landed in it, yet F_EC24 still got a
+      -- garbage a0 (0xAAE97A26). F_E4B0 builds a0 as
       --
-      -- Arming rule: a 32-bit store whose data high half is 0x8850. That is
-      -- the caller's constant being written into the array's slot 1; the array
-      -- base is that address - 4.
+      --   8802E518  lw   t7,28(sp)      ; index (1, then 2)
+      --   8802E520  addu a0,sp,t8       ; t8 = index*4
+      --   8802E524  jal  F_EC24
+      --   8802E528  lw   a0,44(a0)      ; delay slot: a0 = array[index]
+      --
+      -- and again at 8802E5D0/8802E5D4 in its second loop. So the garbage is
+      -- either a bad INDEX (28(sp) was outside the V186 window), a correct
+      -- address that READ back wrong, or a correct read that F_EC24 did not
+      -- receive (the load sits in a jal delay slot and a0 is stored two
+      -- instructions later at 8802EC2C - a forwarding case).
+      --
+      -- V187a: capture that delay-slot load (address, data, hit/miss, site).
+      -- V187b: watch the whole frame, sp'+16 .. sp'+59 (ra, index, array, the
+      --        arg's home slot). F_E4B0's own stores are legitimate; a store
+      --        from any PC outside 8802E4B0..8802E7C4 is the intruder.
+      -- V187c: disarm on F_E4B0's epilogue (8802E7BC addiu sp,+56), so the
+      --        dead frame can be reused by later calls without false hits.
       signal armed      : std_logic := '0';
       signal arr_lo     : unsigned(31 downto 0) := (others => '0');
       signal arr_hi     : unsigned(31 downto 0) := (others => '0');
       signal lp_addr    : unsigned(31 downto 0) := (others => '0');
-      signal lp_data    : std_logic_vector(31 downto 0) := (others => '0');
       signal lp_pc      : std_logic_vector(31 downto 0) := (others => '0');
       signal l_hit      : std_logic := '0';
-      signal l_changed  : std_logic := '0';
+      signal c_pending  : std_logic := '0';
+      signal c_addr     : unsigned(31 downto 0) := (others => '0');
+      signal c_data     : std_logic_vector(31 downto 0) := (others => '0');
+      signal c_site     : std_logic := '0';
+      signal c_hit      : std_logic := '0';
+      -- V189: live (never frozen by a fault) sector-check counters. F_EC24
+      -- is entered once per sector checked; 8802EC54 runs only when the
+      -- 0x1F8-byte checksum (F_D560) disagrees with the word at +0x1F8.
+      signal cnt_chk    : unsigned(15 downto 0) := (others => '0');
+      signal cnt_bad    : unsigned(15 downto 0) := (others => '0');
+      -- V190: F_D560's loop bounds, live. d_end = t1 as computed by
+      -- `addu t1,a0,a1` at 8802D564; d_start = the address of the first
+      -- `lbu a3,0(a0)` (8802D58C) after that; d_cur = the latest one.
+      signal d_end      : std_logic_vector(31 downto 0) := (others => '0');
+      signal d_start    : std_logic_vector(31 downto 0) := (others => '0');
+      signal d_cur      : std_logic_vector(31 downto 0) := (others => '0');
+      signal d_first    : std_logic := '0';
+      -- V193: the failing sector check, end to end. last_* follow the
+      -- register file writes (stage 4) and F_D934's arguments; f_* freeze
+      -- them when F_EC24 takes its mismatch path (8802EC54); o_end is the
+      -- buffer+504 of the last check that matched.
+      signal last_v0    : std_logic_vector(31 downto 0) := (others => '0');
+      signal last_t7    : std_logic_vector(31 downto 0) := (others => '0');
+      signal last_ra, last_sp : std_logic_vector(31 downto 0) := (others => '0');
+      -- V206: watchpoint on the word holding KI's game-mode byte, 88084400
+      -- (phys 08084400). V205: the dispatcher at 88002060 read 0xFC there
+      -- (valid modes are 1..32), indexed past its table and jumped to
+      -- 200A4451. The last two stores to that word, frozen at the first
+      -- exception (ff_valid).
+      signal w1_pc, w1_data, w2_pc, w2_data : std_logic_vector(31 downto 0) := (others => '0');
+      signal w1_mask  : std_logic_vector(7 downto 0) := (others => '0');
+      signal w_cnt    : unsigned(23 downto 0) := (others => '0');
+      -- V208: the first store that puts a mode > 32 into byte 0.
+      signal bs_valid : std_logic := '0';
+      signal bs_pc, bs_data : std_logic_vector(31 downto 0) := (others => '0');
+      -- V207: the dispatcher's mode-byte load (8802205C `lbu a2,0(fp)`,
+      -- fp = 88084400). V206: nothing but the boot ROM ever stored to that
+      -- word (value 3), yet V205's crash read 0xFC there - ~0x03. So: the
+      -- first load whose result is not 3, how long it took and which D-cache
+      -- states it went through, against the last good one.
+      signal lb_track   : std_logic := '0';
+      signal lb_cyc     : unsigned(7 downto 0) := (others => '0');
+      signal lb_states  : std_logic_vector(31 downto 0) := (others => '0');
+      signal lb_n       : unsigned(23 downto 0) := (others => '0');
+      signal bad_valid  : std_logic := '0';
+      signal bad_val    : std_logic_vector(31 downto 0) := (others => '0');
+      signal bad_states, good_states : std_logic_vector(31 downto 0) := (others => '0');
+      signal bad_cyc, good_cyc : unsigned(7 downto 0) := (others => '0');
+      signal last_lba   : std_logic_vector(31 downto 0) := (others => '0');
+      signal f_v0       : std_logic_vector(31 downto 0) := (others => '0');
+      signal f_t7       : std_logic_vector(31 downto 0) := (others => '0');
+      signal f_lba      : std_logic_vector(31 downto 0) := (others => '0');
+      signal f_end      : std_logic_vector(31 downto 0) := (others => '0');
+      signal o_end      : std_logic_vector(31 downto 0) := (others => '0');
+      signal chk_fail   : std_logic := '0';
+      -- V196: per record copy (LBA 5 / LBA 12): F_D934's return value and
+      -- how many sectors its copy loop (8802DC40) ran; plus every `sh` at
+      -- 8802DC58 to copy 2's checksum slot (phys 08500FF8 / 08500FFA).
+      signal n_cp       : unsigned(15 downto 0) := (others => '0');
+      signal r5, r12    : std_logic_vector(15 downto 0) := (others => '0');
+      signal n5, n12    : std_logic_vector(15 downto 0) := (others => '0');
+      signal s_lo, s_hi : std_logic_vector(31 downto 0) := (others => '0');
+      signal s_cnt      : unsigned(31 downto 0) := (others => '0');
    begin
       process (clk93)
          variable hit_i : integer range 0 to HN := HN;
@@ -1900,7 +1990,9 @@ begin
                rp_ln <= (others => '0');
                rp_stored <= (others => '0'); rp_slot <= (others => '0');
                rp_rflword <= (others => '0'); rp_vflags <= (others => '0');
-               armed <= '0'; l_hit <= '0'; l_changed <= '0';
+               armed <= '0'; l_hit <= '0'; c_pending <= '0';
+               c_addr <= (others => '0'); c_data <= (others => '0');
+               c_site <= '0'; c_hit <= '0'; lp_pc <= (others => '0');
             elsif (ce_93 = '1' and probe_freeze = '0') then
                -- A cached 32-bit store enters the history and OPENS the window.
                if (executeNew = '1' and stall4Masked = "00000" and
@@ -1924,62 +2016,49 @@ begin
                   exc_mark <= debug_entry_count_register;
                end if;
 
-               -- V186 arming, and the intruder that follows it.
-               --
-               -- The caller builds the array from ONE constant: `lui a0,0x8850`
-               -- gives 0x88500000 and `+0xE00` gives 0x88500E00. So every
-               -- SETUP store into the array has a data high half of 0x8850,
-               -- and any store into the same slot word that does NOT is an
-               -- intruder. That is the whole rule, and it is why the window
-               -- only ever GROWS: the first version re-armed on the second
-               -- setup store (0x88500E00 has the same high half) and moved the
-               -- window off the slot it was supposed to be watching.
-               --
-               -- cpu_pocket rotates a store's 64-bit word so the addressed
-               -- dword sits at the lane its address names; address bit 2
-               -- selects which half is the slot's data.
+               -- V187b: arm on F_E4B0's first setup store (sw t6,4(t7) at
+               -- 8802E4CC writes sp'+48), which fixes the frame base sp'.
+               -- Every call re-arms afresh and clears the previous intruder.
                if (executeNew = '1' and stall4Masked = "00000" and
                    executeMemWriteEnable = '1') then
-                  -- EITHER half names the constant: the lane the store's dword
-                  -- lands in is not guaranteed to follow address bit 2 for a
-                  -- 32-bit store in this pipeline, and arming must not depend on
-                  -- resolving that. (The intruder's data below is still read
-                  -- from the lane the address names, which is what the cache
-                  -- will hold.)
-                  -- V186b (Claude): arm on the PC of the two setup stores in
-                  -- F_E4B0 (sw t6,4(t7) @8802E4CC and sw t9,8(t0) @8802E4DC),
-                  -- not on 0x8850 data: 0x88500000 is used by 14 sites in the
-                  -- game and a data-keyed window that only grows could span
-                  -- unrelated memory. E4CC re-arms afresh on every call.
-                  if (prof_pc2 = x"8802E4CC" or prof_pc2 = x"8802E4DC") then
-                     if (armed = '0' or prof_pc2 = x"8802E4CC") then
-                        arr_lo <= executeMemAddress - 4;
-                        arr_hi <= executeMemAddress + 4;
-                        armed  <= '1';
-                        l_hit  <= '0';
-                        l_changed <= '0';
-                     else
-                        if (executeMemAddress < arr_lo) then
-                           arr_lo <= executeMemAddress - 4;
-                        end if;
-                        if (executeMemAddress > arr_hi) then
-                           arr_hi <= executeMemAddress + 4;
-                        end if;
-                     end if;
+                  if (prof_pc2 = x"8802E4CC") then
+                     arr_lo <= executeMemAddress - 32;  -- sp'+16
+                     arr_hi <= executeMemAddress + 11;  -- sp'+59
+                     armed  <= '1';
+                     l_hit  <= '0';
                   elsif (armed = '1' and
                          executeMemAddress >= arr_lo and
-                         executeMemAddress <= arr_hi) then
-                     -- Inside the array and not a 0x8850 setup store: this is
-                     -- the write that turned a constant into a pointer.
+                         executeMemAddress <= arr_hi and
+                         (unsigned(prof_pc2) < x"8802E4B0" or
+                          unsigned(prof_pc2) > x"8802E7C4")) then
                      lp_addr <= executeMemAddress;
                      lp_pc   <= prof_pc2;
-                     if (executeMemAddress(2) = '1') then
-                        lp_data <= std_logic_vector(executeMemWriteData(63 downto 32));
-                     else
-                        lp_data <= std_logic_vector(executeMemWriteData(31 downto 0));
-                     end if;
-                     l_hit     <= '1';
-                     l_changed <= '1';
+                     l_hit   <= '1';
+                  end if;
+               end if;
+
+               -- V187c: F_E4B0 releases its frame.
+               if (executeNew = '1' and stall4Masked = "00000" and
+                   prof_pc2 = x"8802E7BC") then
+                  armed <= '0';
+               end if;
+
+               -- V187a: the delay-slot load that becomes F_EC24's a0.
+               if (executeNew = '1' and stall4Masked = "00000" and
+                   executeMemReadEnable = '1' and
+                   (prof_pc2 = x"8802E528" or prof_pc2 = x"8802E5D4")) then
+                  c_pending <= '1';
+                  c_addr    <= executeMemAddress;
+                  if (prof_pc2 = x"8802E5D4") then c_site <= '1'; else c_site <= '0'; end if;
+                  if (datacache_debug_state = "00000") then c_hit <= '1'; else c_hit <= '0'; end if;
+               end if;
+               if (c_pending = '1' and (datacache_readdone = '1' or
+                                        mem_finished_read = '1')) then
+                  c_pending <= '0';
+                  if (writebackWriteEnable = '1') then
+                     c_data <= std_logic_vector(writebackData(31 downto 0));
+                  else
+                     c_data <= datacache_data_out(31 downto 0);
                   end if;
                end if;
 
@@ -2128,29 +2207,174 @@ begin
       --         [5]   the write-through store was issued to the bridge
       --         [4]   ... carrying the stored value (and a 0x0F byte mask)
       --         [3:0] other stores to the same line in between
-      debug_stack_probe0 <= rp_data;
-      debug_stack_probe1 <= std_logic_vector(rp_ln) & rp_flags;
-      debug_stack_probe2 <= rp_stored;
-      -- V186b: after an intruder hit S3 shows the INTRUDER's address
-      -- (FL[10]=1 says which); before, the watched slot as in V185.
-      debug_stack_probe3 <= std_logic_vector(lp_addr) when l_hit = '1' else rp_slot;
+      -- V190: rows 10 tail / 6 / 11 now carry F_D560's bounds (see d_end).
+      -- V193 screen: S2 (row 6) = LBA of the last F_D934 read before the
+      -- failing check; row 10 tail = that check's buffer+504; S3 (row 11) =
+      -- checksum computed (v0); EX tail (row 8) = checksum stored (t7);
+      -- AD tail (row 12) = buffer+504 of the last check that matched.
+      -- V196 screen: S2 (row 6) = {D934 return for LBA 5, for LBA 12};
+      -- row 10 tail = {sectors copied for LBA 5, for LBA 12}; S3 (row 11) =
+      -- last data stored at 08500FF8; EX tail (row 8) = at 08500FFA;
+      -- AD tail (row 12) = how many stores hit 08500FF8.
+      -- V203: S2 (row 6) = EPC of the first departure, S3 (row 11) = ra,
+      -- row 10 tail = sp, both as of that departure.
+      -- V204: S2 (row 6) = EPC of the first non-interrupt exception,
+      -- S3 (row 11) = its BadVAddr, row 10 tail = its Cause (bit 31 = BD,
+      -- ExcCode in bits 6:2), AD tail (row 12) = ra as of it, EX tail (row
+      -- 8) = sp as of it. 0 everywhere = no such exception yet.
+      -- V205: S2 (row 6) = pc2, S3 (row 11) = op2, row 8 tail = pc1,
+      -- row 10 tail = op1, row 12 tail = ra; all at the first exception.
+      -- V206: S2 (row 6) = PC of the last store to 88084400's word, S3
+      -- (row 11) = its data; row 8 tail = the store before (PC), row 10
+      -- tail = its data; row 12 tail = {last mask, store count}.
+      -- V207: S2 (row 6) = first bad mode-byte load value (a2), S3 (row
+      -- 11) = D-cache states it visited (bit n = state n), row 8 tail = the
+      -- last good load's states, row 10 tail = {bad cycles, good cycles,
+      -- 0, bad_valid}, row 12 tail = {stores to the word (8b), loads (24b)}.
+      -- V208: S2 = last store's PC, S3 = its data, row 8 tail = first
+      -- store of a mode > 32 (PC), row 10 tail = its data, row 9 tail = the
+      -- first bad load's D-cache states, row 12 tail = {stores (8b), bad
+      -- load byte, bad load cycles, 7 zeros & bad load seen}.
+      debug_stack_probe0 <= bs_data;
+      debug_stack_probe1 <= std_logic_vector(w_cnt(7 downto 0)) & bad_val(7 downto 0) &
+                            std_logic_vector(bad_cyc) & "0000000" & bad_valid;
+      debug_stack_probe2 <= w1_pc;
+      -- V187 screen, all frozen with the rest at the fault departure:
+      --   S3  (row 11)       intruder's address if FL[10], else the V185 slot
+      --   FL[11:8]           armed, intruder seen, site (0 = E528, 1 = E5D4),
+      --                      the delay-slot load hit the D-cache
+      --   FL[7:0]            V185's flags
+      --   EX tail (row 8)    the delay-slot load's ADDRESS (sp'+44+4*index)
+      --   S2 tail (row 6)    the delay-slot load's DATA (compare with S2)
+      --   BV tail (row 9)    the intruder's PC, 0 if none
+      debug_stack_probe3 <= w1_data;
       debug_stack_probe4 <= rp_rflword;
-      -- V186 flags, same freeze as everything else:
-      --   [11] the array's setup store was seen (armed)
-      --   [10] another store landed inside the 3-entry array
-      --   [9]  that store's value differs from the setup value
-      --   [8]  that value is odd (the board's garbage was odd-aligned)
-      --   [7:0] V185's flags
-      debug_stack_flags  <= armed & l_hit & l_changed & lp_data(0) &
+      debug_stack_flags  <= armed & l_hit & c_site & c_hit &
                             rp_vflags(7 downto 0);
-      -- Before a hit this shows the ARRAY BASE the watchpoint learned, which is
-      -- itself worth having: it names the frame. After a hit it shows the
-      -- intruder's address instead.
-      -- V186b: after a hit, row 8 tail is the intruder's PC (its address
-      -- moved to S3); before a hit, the array base the watchpoint learned.
-      debug_array_addr <= lp_pc when l_hit = '1'
-                          else std_logic_vector(arr_lo);
-      debug_array_data   <= lp_data;
+      debug_array_addr   <= bs_pc;
+      debug_array_data   <= c_data;
+      -- V189: with no intruder, the row-9 tail is {sectors checked, checksum
+      -- mismatches}, both saturating, both live.
+      debug_array_pc     <= bad_states;  -- V208
+
+      process (clk93)
+      begin
+         if rising_edge(clk93) then
+            if (reset_93 = '1') then
+               cnt_chk <= (others => '0');
+               cnt_bad <= (others => '0');
+               d_first <= '0';
+            else
+             -- V207 load tracking (every ce cycle).
+             if (ce_93 = '1' and lb_track = '1') then
+               if (lb_cyc /= x"FF") then lb_cyc <= lb_cyc + 1; end if;
+               lb_states(to_integer(unsigned(datacache_debug_state))) <= '1';
+               -- stall4 = 0: while a miss holds stage 4, writebackData can
+               -- still be the address, not the answer.
+               if (writebackWriteEnable = '1' and writebackTarget = 6 and stall4 = '0') then
+                  lb_track <= '0';
+                  if (lb_n /= x"FFFFFF") then lb_n <= lb_n + 1; end if;
+                  -- V208: the dispatcher's table has entries 0..32 only.
+                  if (unsigned(writebackData(7 downto 0)) <= 32) then
+                     good_states <= lb_states; good_cyc <= lb_cyc;
+                  elsif (bad_valid = '0') then
+                     bad_valid  <= '1';
+                     bad_val    <= std_logic_vector(writebackData(31 downto 0));
+                     bad_states <= lb_states; bad_cyc <= lb_cyc;
+                  end if;
+               end if;
+             end if;
+             if (ce_93 = '1' and writebackWriteEnable = '1') then
+               if (writebackTarget = 2)  then last_v0 <= std_logic_vector(writebackData(31 downto 0)); end if;
+               if (writebackTarget = 15) then last_t7 <= std_logic_vector(writebackData(31 downto 0)); end if;
+               -- V203: ra/sp as of the first departure (frozen with it).
+               if (ff_valid = '0') then
+                  if (writebackTarget = 31) then last_ra <= std_logic_vector(writebackData(31 downto 0)); end if;
+                  if (writebackTarget = 29) then last_sp <= std_logic_vector(writebackData(31 downto 0)); end if;
+               end if;
+             end if;
+             if (ce_93 = '1' and executeNew = '1' and stall4Masked = "00000") then
+               if (prof_pc2 = x"8802EC24" and cnt_chk /= x"FFFF") then
+                  cnt_chk <= cnt_chk + 1;
+               end if;
+               if (prof_pc2 = x"8802EC24") then
+                  chk_fail <= '0';
+               end if;
+               if (prof_pc2 = x"8802EC54" and cnt_bad /= x"FFFF") then
+                  cnt_bad <= cnt_bad + 1;
+               end if;
+               -- V193: `or a1,a0,zero` at F_D934's entry: a1 = the LBA.
+               if (prof_pc2 = x"8802D93C") then
+                  last_lba <= std_logic_vector(resultData(31 downto 0));
+               end if;
+               if (prof_pc2 = x"8802EC54") then
+                  chk_fail <= '1';
+                  f_v0     <= last_v0;
+                  f_t7     <= last_t7;
+                  f_lba    <= last_lba;
+                  f_end    <= d_end;
+               end if;
+               if (prof_pc2 = x"8802EC60" and chk_fail = '0') then
+                  o_end    <= d_end;
+               end if;
+               -- V196
+               if (prof_pc2 = x"8802D934") then
+                  n_cp <= (others => '0');
+               end if;
+               if (prof_pc2 = x"8802DC40" and n_cp /= x"FFFF") then
+                  n_cp <= n_cp + 1;
+               end if;
+               -- Two instructions after F_D934 returns to F_E4B0: its
+               -- `andi v0,v0,0x21` (delay slot) has written v0 by now.
+               if (prof_pc2 = x"8802E50C") then
+                  if (last_lba = x"00000005") then
+                     r5 <= last_v0(15 downto 0); n5 <= std_logic_vector(n_cp);
+                  elsif (last_lba = x"0000000C") then
+                     r12 <= last_v0(15 downto 0); n12 <= std_logic_vector(n_cp);
+                  end if;
+               end if;
+               if (prof_pc2 = x"88002060") then
+                  lb_track  <= '1';
+                  lb_cyc    <= (others => '0');
+                  lb_states <= (others => '0');
+               end if;
+               if (ff_valid = '0' and executeMemWriteEnable = '1' and
+                   executeMemAddress(31 downto 2) = "000010000000100010111100000000") then  -- V208: 8808BC00 (fp in 88002038)
+                  w2_pc   <= w1_pc;   w2_data <= w1_data;
+                  w1_pc   <= prof_pc2;
+                  w1_data <= std_logic_vector(executeMemWriteData(31 downto 0));
+                  w1_mask <= executeMemWriteMask;
+                  if (w_cnt /= x"FFFFFF") then w_cnt <= w_cnt + 1; end if;
+                  if (bs_valid = '0' and executeMemWriteMask(0) = '1' and
+                      unsigned(executeMemWriteData(7 downto 0)) > 32) then
+                     bs_valid <= '1'; bs_pc <= prof_pc2;
+                     bs_data  <= std_logic_vector(executeMemWriteData(31 downto 0));
+                  end if;
+               end if;
+               if (prof_pc2 = x"8802DC58") then
+                  if (executeMemAddress = x"08500FF8") then
+                     s_lo <= std_logic_vector(executeMemWriteData(31 downto 0));
+                     if (s_cnt /= x"FFFFFFFF") then s_cnt <= s_cnt + 1; end if;
+                  elsif (executeMemAddress = x"08500FFA") then
+                     s_hi <= std_logic_vector(executeMemWriteData(31 downto 0));
+                  end if;
+               end if;
+               -- V190
+               if (prof_pc2 = x"8802D564") then
+                  d_end   <= std_logic_vector(resultData(31 downto 0));
+                  d_first <= '1';
+               end if;
+               if (prof_pc2 = x"8802D58C") then
+                  d_cur <= std_logic_vector(executeMemAddress);
+                  if (d_first = '1') then
+                     d_start <= std_logic_vector(executeMemAddress);
+                     d_first <= '0';
+                  end if;
+               end if;
+             end if;
+            end if;
+         end if;
+      end process;
    end block;
    debug_eret_epc      <= eret_epc_held;
    debug_eret_target   <= eret_target_held;
@@ -2354,6 +2578,7 @@ begin
             debug_prev_op_live      <= std_logic_vector(opcode1);
             -- One deeper, so two consecutive fetches can be compared.
             hist_op1 <= debug_prev_op_live;
+            hist_pc1 <= debug_fetch_pc_register;
             -- EVERY transition out of the decompressed program back into
             -- the boot ROM, with the address it landed on, the address it left
             -- from, and a running count.
@@ -2375,7 +2600,15 @@ begin
             -- debug_prev_op_live. hist_op1 is TWO decodes back and does not
             -- describe the departure at all; it was carried over from upstream
             -- and made DO unreadable.
-            if (debug_fetch_pc_register(31 downto 24) = x"88" and
+            -- V202: from ANY non-ROM address (an exception reaches the ROM
+            -- through 0x80000180, so requiring 0x88xxxxxx never fired), and
+            -- only the FIRST departure: the reboot's own hand-off back to
+            -- 0x88000000 (trigger 10) used to overwrite it.
+            if (debug_dep_valid_register = '0' and
+                debug_entry_count_register >= 1 and   -- the game has started
+                debug_fetch_pc_register(31 downto 28) /= x"0" and
+                debug_fetch_pc_register(31 downto 20) /= x"9FC" and
+                debug_fetch_pc_register(31 downto 20) /= x"BFC" and
                 (PCold1(31 downto 20) = x"9FC" or
                  PCold1(31 downto 20) = x"BFC")) then
                debug_h1_op_r <= debug_prev_op_live;
@@ -2384,6 +2617,7 @@ begin
                debug_dep_valid_register   <= '1';
                debug_exc_cause_register   <= std_logic_vector(cop0_debug_cause(7 downto 0));
                debug_badvaddr_register    <= std_logic_vector(cop0_debug_badvaddr);
+               debug_dep_epc_register     <= std_logic_vector(cop0_debug_epc);
                -- V184: freeze the stack probe on a FAULT departure only. An
                -- ordinary call into ROM, an interrupt (0), syscall (8) or
                -- break (9) leaves it running.
@@ -2394,12 +2628,26 @@ begin
                end if;
             end if;
 
+            if (ff_valid = '0' and debug_entry_count_register >= 1 and
+                (PCold1(31 downto 0) = x"80000180" or PCold1(31 downto 0) = x"80000000" or
+                 PCold1(31 downto 0) = x"80000080") and
+                cop0_debug_cause(6 downto 2) /= "00000") then
+               ff_valid <= '1';
+               ff_epc   <= std_logic_vector(cop0_debug_epc);
+               ff_bad   <= std_logic_vector(cop0_debug_badvaddr);
+               ff_cause <= std_logic_vector(cop0_debug_cause);
+               ff_pc1   <= debug_fetch_pc_register;
+               ff_op1   <= debug_prev_op_live;
+               ff_pc2   <= hist_pc1;
+               ff_op2   <= hist_op1;
+            end if;
+
             -- The other restart shape: the game jumps straight back to its own
             -- entry point without passing through the boot ROM. ram_reentry is
             -- exactly that test, already built for the trace trigger, so it is
             -- reused rather than compared again. Its own entry-count gate keeps
             -- the legitimate hand-off at boot out of this capture.
-            if (ram_reentry = '1') then
+            if (ram_reentry = '1' and debug_dep_valid_register = '0') then
                debug_h1_op_r              <= debug_prev_op_live;
                debug_dep_pc_register      <= debug_fetch_pc_register;
                debug_dep_trigger_register <= "10";
@@ -5761,8 +6009,8 @@ begin
       read_data         => datacache_data_out,
       
       write_ena         => datacache_writeena,
-      write_be          => executeMemWriteMask,
-      write_data        => std_logic_vector(executeMemWriteData),
+      write_be          => datacache_wbe,
+      write_data        => datacache_wdata,
       write_done        => datacache_writedone,
       
       CacheCommandEna   => cache_commandEnableD,
@@ -5989,6 +6237,8 @@ begin
       
       datacache_writeena   <= '0';
       datacache_readena    <= '0';
+      datacache_wbe        <= executeMemWriteMask;
+      datacache_wdata      <= std_logic_vector(executeMemWriteData);
       
       datacache_addr   <= executeMemAddress;
       if (executeMemReadEnable = '1') then
@@ -6101,8 +6351,14 @@ begin
          mem4_dataWrite <= fifoStall_dataWrite;
          mem4_writeMask <= fifoStall_writeMask;
          mem4_req64     <= fifoStall_req64;
+         -- Only when the cache did not take the store at issue (see the
+         -- latch), and from the LATCHED copy: stage 3 already holds the next
+         -- instruction, so executeMem* would write its address and data.
          if (fifoStall_useCache = '1') then
             datacache_writeena <= '1';
+            datacache_addr     <= fifoStall_address;
+            datacache_wbe      <= fifoStall_writeMask;
+            datacache_wdata    <= fifoStall_dataWrite;
          end if;
       end if;
       
@@ -6215,7 +6471,16 @@ begin
                   writeback_fifoStall          <= '0';
                   
                   -- check if last command must be forwarded
-                  if (resultWriteEnable = '1' or executeCOP0ReadEnable = '1' or executeCOP2ReadEnable = '1') then
+                  -- Not a COP0/COP2 read: it always takes the stage-3 bubble
+                  -- (stall3 with executeStallFromMEM), so the instruction
+                  -- that reads it next is the one held in stage 2
+                  -- (decodeSource1/2, the block below), not decSource1/2.
+                  -- Matching decSource here handed mfc0's result to the
+                  -- instruction in between: in KI's ATA wait loop
+                  -- (8802DBC8 mfc0 v0,Cause; beq at,zero,timeout; andi
+                  -- v0,v0,0x800) the beq saw v0 on both operands and took
+                  -- the timeout every time.
+                  if (resultWriteEnable = '1') then
                      if (decSource1 > 0 and resultTarget = decSource1) then writebackForwardValue1 <= '1'; end if;
                      if (decSource2 > 0 and resultTarget = decSource2) then writebackForwardValue2 <= '1'; end if;
                   end if;
@@ -6256,7 +6521,12 @@ begin
                         fifoStall_dataWrite <= mem4_dataWrite;
                         fifoStall_writeMask <= mem4_writeMask;
                         fifoStall_req64     <= mem4_req64;
-                        fifoStall_useCache  <= executeMemUseCache;
+                        -- Write-through: the cache usually takes the store at
+                        -- issue (write_done) while the FIFO does not. Replay
+                        -- only the half still pending; a second cache write
+                        -- re-raised write_done under the NEXT instruction and
+                        -- released a load's stage-4 wait (V190: a1 lost).
+                        fifoStall_useCache  <= executeMemUseCache and not datacache_writedone;
                      else
                         writebackNew        <= '1';
                      end if;
@@ -6339,14 +6609,23 @@ begin
                read_fifoStall <= '0';
             end if;
 
+            -- Release once the FIFO has it and, if the cache half was still
+            -- pending, the cache too (else re-offer both: a repeated store of
+            -- the same data to cached RAM is harmless).
             if (writeback_fifoStall = '1' and
-                writefifo_mem4_ready = '1' and mem4_request = '1') then
+                writefifo_mem4_ready = '1' and mem4_request = '1' and
+                (fifoStall_useCache = '0' or datacache_writedone = '1')) then
                stall4              <= '0';
                writebackNew        <= '1';
                writeback_fifoStall <= '0';
             end if;
             
-            if (datacache_writedone = '1') then
+            -- Not for a store whose FIFO half is pending or being blocked on
+            -- this very edge: write-through answers write_done at issue, and
+            -- releasing here let the pipeline run on with the store still
+            -- owed to the FIFO. The fifoStall release above retires it.
+            if (datacache_writedone = '1' and writeback_fifoStall = '0' and
+                not (mem4_request = '1' and mem4_rnw = '0' and writefifo_mem4_ready = '0')) then
                stall4        <= '0';
                writebackNew  <= '1';
             end if;
@@ -6709,7 +6988,7 @@ begin
    -- MEASURED, NOT VERIFIED IN SOFTWARE: no disassembler run on the game code
    -- (which lives on the hard disk) has confirmed KI never executes COP1.
    -- error_FPU is wired to cpu_errors, so hardware will say so if it does.
-icpu_FPU : entity work.cpu_FPU_stub
+icpu_FPU : entity work.cpu_FPU
    port map
    (
       clk93             => clk93,         

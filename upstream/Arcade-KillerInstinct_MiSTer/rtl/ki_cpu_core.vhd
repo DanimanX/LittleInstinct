@@ -169,6 +169,7 @@ entity ki_cpu_core is
       debug_stack_flags       : out std_logic_vector(11 downto 0) := (others => '0');
       debug_array_addr        : out std_logic_vector(31 downto 0) := (others => '0');
       debug_array_data        : out std_logic_vector(31 downto 0) := (others => '0');
+      debug_array_pc          : out std_logic_vector(31 downto 0) := (others => '0');
       -- Board-side freeze request; see cpu.vhd's port of the same name.
       debug_trace_trigger     : in  std_logic;
 
@@ -413,6 +414,7 @@ begin
          debug_stack_flags       => debug_stack_flags,
          debug_array_addr        => debug_array_addr,
          debug_array_data        => debug_array_data,
+         debug_array_pc          => debug_array_pc,
          debug_trace_trigger     => debug_trace_trigger,
          mem_request           => mem_request,
          mem_rnw               => mem_rnw,

@@ -121,6 +121,16 @@ module ki_ata (
   logic        image_readonly;
   logic [31:0] image_sectors;
   logic        sd_ack_d;
+  // A host batch this core no longer wants: a new command (READ, IDENTIFY,
+  // WRITE, SRST) reset the fetch engine while pk_io/HPS was still filling the
+  // old one, or a request was taken on the very edge it was withdrawn. With
+  // the Pocket's ~45 ms APF round trip KI's driver issues its next READ
+  // before the previous batch lands. Without this the stale batch landed in
+  // the NEW command's bank 0 and its sd_ack fall marked that bank valid, so
+  // the CPU got another LBA's sectors (KI's record copy at LBA 12 never
+  // checksummed and the game looped forever). While set: the batch's words
+  // are not written, its end validates nothing, and no new fetch starts.
+  logic        fetch_orphan = 1'b0;
   logic        identify_transfer;
 
   // Read streaming state. read_active gates the fetch engine so it can never
@@ -201,7 +211,7 @@ module ki_ata (
     .clock1(clk),
     .address_b(buf_hps_addr),
     .data_b(sd_buff_dout),
-    .wren_b(sd_ack && sd_buff_wr),
+    .wren_b(sd_ack && sd_buff_wr && !fetch_orphan),
     .byteena_b(1'b1),
     .q_b(sd_buff_din),
 
@@ -264,7 +274,7 @@ module ki_ata (
       if (bus_byte_enable[1])
         simulation_sector_buffer[buf_cpu_addr][15:8] <= bus_write_data[15:8];
     end
-    if (sd_ack && sd_buff_wr)
+    if (sd_ack && sd_buff_wr && !fetch_orphan)
       simulation_sector_buffer[buf_hps_addr] <= sd_buff_dout;
   end
 `endif
@@ -442,7 +452,15 @@ module ki_ata (
       deliver_remaining <= 9'd0;
       fetch_batch       <= '0;
       fetch_busy        <= 1'b0;
+      fetch_orphan      <= 1'b0;
     end else begin
+      // sd_ack high while no fetch of ours and no write is outstanding can
+      // only be a batch nobody is waiting for any more.
+      if (sd_ack && !fetch_busy && state != ATA_SD_WRITE_WAIT && !sd_wr)
+        fetch_orphan <= 1'b1;
+      if (fetch_orphan && !sd_ack && sd_ack_d)
+        fetch_orphan <= 1'b0;
+
       // Count the write handshake from both ends: every sector this core asks
       // the HPS to commit, and every one the HPS acknowledges. If issued
       // climbs while acked does not, the request never completes and the write
@@ -483,7 +501,7 @@ module ki_ata (
       // the CPU a halfword at a time, the HPS round trip for the next batch is
       // already in flight against the other.
       if (read_active && !fetch_busy && fetch_remaining != 9'd0 &&
-          !bank_valid[fill_bank]) begin
+          !bank_valid[fill_bank] && !fetch_orphan && !sd_ack && !sd_ack_d) begin
         if (!image_ready || sd_lba >= image_sectors || fetch_want == 9'd0) begin
           command_abort();
           read_active <= 1'b0;
@@ -528,10 +546,10 @@ module ki_ata (
         end
       end
 
-      if (state == ATA_SD_WRITE_WAIT && sd_ack && !sd_ack_d)
+      if (state == ATA_SD_WRITE_WAIT && sd_ack && !sd_ack_d && !fetch_orphan)
         sd_wr <= 1'b0;
 
-      if (state == ATA_SD_WRITE_WAIT && !sd_ack && sd_ack_d) begin
+      if (state == ATA_SD_WRITE_WAIT && !sd_ack && sd_ack_d && !fetch_orphan) begin
         if (sectors_remaining > 1) begin
           sectors_remaining <= sectors_remaining - 1'b1;
           sd_lba            <= sd_lba + 1'b1;

@@ -30,7 +30,11 @@ set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cp
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_mul.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_cop0.vhd ]
 set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/cpu_pocket.vhd ]
-set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/cpu_FPU_stub.vhd ]
+# V200: the real FPU. KI's game code (on the disk) has ~600 COP1 ops, mostly
+# single precision (mul/add/sub/div.s, cvt, c.cond, sqrt.s); the stub returned
+# 0 for all of them, including mfc1/mtc1 - wrong colours and dark sprites.
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_FPU_sqrt.vhd ]
+set_global_assignment -name VHDL_FILE [file join $::quartus(qip_path) rtl/cpu/cpu_FPU.vhd ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/cpu/r4600_64in32_micro.sv ]
 
 # DCS memory subsystem. A nested .qip resolves its paths relative to its own

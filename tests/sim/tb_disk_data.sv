@@ -31,13 +31,20 @@ module tb_disk_data;
 	localparam integer SECTOR      = 512;
 	localparam integer HALFWORDS   = SECTOR / 2;
 	localparam [31:0]  DISK_BASE   = 32'h4000_0000;
-	localparam integer VEC_SECTORS = 13;
-	// One entry per block in disk_sectors.hex, in file order.
+	localparam integer VEC_SECTORS = 29;   // 13 file blocks + the latent ones
+	// 'Overtaken read': the host holds the answer to the batch for LBA 5 back
+	// by this many clk_74a cycles (as a real APF round trip would). Override
+	// with -P tb_disk_data.HOST_DELAY_CYCLES=N / HOST_WORD_GAP=N / CLK_NS=N.
+	parameter integer  HOST_DELAY_CYCLES = 2000;
+	parameter integer  HOST_WORD_GAP     = 0;
+	// clk period in ns. 100 is the 100 ns this bench always used; 40 is the
+	// runner-up ratio the overtaken-read scenario was probed at (see its note).
+	parameter real     CLK_NS           = 40.0;
 
 	// ---------------------------------------------------------------- clocking
 	reg clk_74a = 0, clk = 0;
 	always #6.734 clk_74a = ~clk_74a;
-	always #10.0  clk     = ~clk;
+	always #(CLK_NS/2.0) clk = ~clk;
 
 	reg loader_reset = 1, loader_abort = 0, loader_end = 0;
 	reg ata_reset = 1;   // ki_ata's registers have no initialisers: pulse this
@@ -62,7 +69,11 @@ module tb_disk_data;
 
 	// ATA <-> pk_io
 	wire [31:0] sd_lba; wire [5:0] sd_blk_cnt;
-	wire sd_rd, sd_wr, sd_ack;
+	wire ata_sd_rd, sd_wr, sd_ack;
+	// The bench may drive sd_rd itself to stand in for pk_io's S_DONE latch
+	// (it samples the level, not ki_ata's one-cycle pulse).
+	reg  sd_rd_drv = 1'b0;
+	wire sd_rd = sd_rd_drv ? 1'b1 : ata_sd_rd;
 	wire [12:0] sd_buff_addr; wire [15:0] sd_buff_dout, sd_buff_din;
 	wire sd_buff_wr;
 	wire ata_irq;
@@ -112,7 +123,7 @@ module tb_disk_data;
 		.bus_read_data(bus_rdata), .bus_done(bus_done), .irq(ata_irq),
 		.img_mounted(img_mounted), .img_readonly(img_readonly),
 		.img_size(img_size), .sd_lba(sd_lba), .sd_blk_cnt(sd_blk_cnt),
-		.sd_rd(sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
+		.sd_rd(ata_sd_rd), .sd_wr(sd_wr), .sd_ack(sd_ack),
 		.sd_buff_addr(sd_buff_addr), .sd_buff_dout(sd_buff_dout),
 		.sd_buff_din(sd_buff_din), .sd_buff_wr(sd_buff_wr),
 		.debug_state(ata_state), .debug_status(ata_status),
@@ -122,17 +133,54 @@ module tb_disk_data;
 
 	// ---------------------------------------------------------------- vectors
 	// One 16-bit halfword per line, little-endian, 256 per sector.
-	reg [15:0] vec [0:VEC_SECTORS*HALFWORDS-1];
+	//
+	// The image file on disk carries four blocks (0, 1, 2, 255919); the extra
+	// LBAs the overtaken-read scenario needs are not in it. Synthesise them
+	// deterministically here rather than shipping more image content, and check
+	// disjointly: every LBA this bench compares must differ from the two LBAs
+	// the late batch carries, or a stale write would compare equal and the
+	// scenario would pass for the wrong reason.
+	reg vectors_ready = 1'b0;
+	integer errors = 0;
+	// Exactly as many words as disk_sectors.hex holds: $readmemh stops at the
+	// end of the file and leaves the remainder X, so an oversized array is a
+	// silent source of x's in every comparison that reaches past the file.
+	localparam integer FILE_BLOCKS = 4;
+	reg [15:0] filev [0:FILE_BLOCKS*HALFWORDS-1];
+	// The tasks below are NOT automatic, so this table lives in their scope.
+	reg [15:0] vec   [0:VEC_SECTORS*HALFWORDS-1];
 	integer lba_of [0:VEC_SECTORS-1];
+	integer vi, wi;
+	function [15:0] synth(input integer lba, input integer idx);
+		synth = 16'h1000 ^ (lba[15:0] << 4) ^ idx[15:0];
+	endfunction
 	initial begin
-		$readmemh("tests/sim/vectors/disk_sectors.hex", vec);
+		$readmemh("tests/sim/vectors/disk_sectors.hex", filev);
 		lba_of[0]  = 0;  lba_of[1]  = 1;  lba_of[2]  = 2;  lba_of[3]  = 3;
 		lba_of[4]  = 4;  lba_of[5]  = 5;  lba_of[6]  = 6;  lba_of[7]  = 7;
 		lba_of[8]  = 8;  lba_of[9]  = 9;  lba_of[10] = 10; lba_of[11] = 11;
 		lba_of[12] = 255919;
+		// LBAs the older scenarios drain from the second half of a batch.
+		lba_of[13] = 10; lba_of[14] = 8; lba_of[15] = 9;
+		// The overtaken-read batches: A = the late, superseded command's sectors,
+		// B = the ones the CPU must actually receive.
+		for (vi = 0; vi < 7; vi = vi + 1) lba_of[16 + vi] = 5 + vi;   // A batch
+		for (vi = 0; vi < 7; vi = vi + 1) lba_of[23 + vi] = 12 + vi;  // B batch
+		for (vi = 0; vi < VEC_SECTORS; vi = vi + 1)
+			for (wi = 0; wi < HALFWORDS; wi = wi + 1)
+				vec[vi*HALFWORDS + wi] = (vi < FILE_BLOCKS) ? filev[vi*HALFWORDS + wi]
+				                                   : synth(lba_of[vi], wi);
+		// Fail loudly rather than comparing against x's: the image blocks must
+		// have loaded, and the synthetic LBAs must be reached.
+		for (vi = 0; vi < VEC_SECTORS; vi = vi + 1)
+			if (^vec[vi*HALFWORDS] === 1'bx) begin
+				$display("  (bench) vector block %0d (lba %0d) is x", vi, lba_of[vi]);
+				errors = errors + 1;
+			end
+		vectors_ready = 1'b1;
 	end
 
-	integer errors = 0;
+	integer scn_err;
 	task check(input [8*66-1:0] what, input integer ok);
 		begin
 			if (ok) $display("PASS: %0s", what);
@@ -148,11 +196,24 @@ module tb_disk_data;
 	// rtl_batch_words is what the transfer covers; volatile because the host
 	// task reads them after ki_ata has already moved on.
 	integer host_words_done = 0;
+	// Host requests arrive as a queue, not a rendezvous: a request made while
+	// the host is still busy is answered only after the one in flight.
+	integer host_busy_req = 0;
+	integer host_reqs     = 0;
+	integer host_delay    = 0;   // extra clk_74a cycles before this answer
+	// Extra clk_74a cycles between bridge words, and a hold that keeps the host
+	// off the bridge until the scenario has seen its request go out. Both are
+	// module variables named apart from the task arguments on purpose: iverilog
+	// resolved same-named task arguments to these, silently.
+	integer word_gap_m = 0;   // gap in use (0 restores the old straight-through host)
+	integer word_hold  = 0;
 
 	task host_serve;
-		integer base_sector, nwords, i, base_hw;
+		integer base_sector, nwords, i, base_hw, t0;
 		reg [31:0] w;
 		begin
+			if (host_delay > 0) repeat (host_delay) @(posedge clk_74a);
+			while (word_hold != 0) @(posedge clk_74a);
 			base_sector = sd_lba;
 			nwords      = ({26'd0, sd_blk_cnt} + 1) * (SECTOR / 4);
 			$display("   (host) serving lba=%0d words=%0d  [pk_io said slotoffset=%0d length=%0d]",
@@ -164,8 +225,13 @@ module tb_disk_data;
 			if (base_hw == 0 && base_sector != 0)
 				$display("  (host) LBA %0d not in the vectors", base_sector);
 
+			// word_gap_m: extra clk_74a cycles between bridge words, so the
+			// overtaken-read scenario can probe a host that streams slower than
+			// pk_io's drain; 0 is the straight-through host the older cases use.
+			t0 = $time;
 			for (i = 0; i < nwords; i = i + 1) begin
 				w = {vec[base_hw + 2*i + 1], vec[base_hw + 2*i]};
+				repeat (word_gap_m) @(posedge clk_74a);
 				@(posedge clk_74a);
 				bridge_addr    <= DISK_BASE + i * 4;
 				bridge_wr_data <= w;
@@ -174,6 +240,9 @@ module tb_disk_data;
 			@(posedge clk_74a);
 			bridge_wr <= 1'b0;
 			host_words_done = nwords;
+			$display("   (host) lba=%0d streamed %0d words in %.1f us; at the last word: FIFO %0d, disk_words_rem %0d, ack %b, active %b, state %0d",
+			         base_sector, nwords, ($time - t0) / 1000.0, host.fifo.rdusedw,
+			         host.disk_words_rem, sd_ack, host.disk_active, host.st);
 		end
 	endtask
 
@@ -184,8 +253,13 @@ module tb_disk_data;
 	// PREVIOUS transfer's values - in practice zeros, which made the host
 	// stream nothing and left the batch open. Sample them a few clocks later.
 	always @(posedge tds_read) begin
-		fork
+		host_reqs = host_reqs + 1;
+		if (host_busy_req) begin
+			$display("  (host) request at t=%0t queued behind the one in flight (sd_lba=%0d)",
+			         $time, sd_lba);
+		end else fork
 			begin
+				host_busy_req = 1;
 				repeat (8) @(posedge clk_74a);
 				tds_ack <= 1'b1;
 				host_serve;
@@ -193,6 +267,7 @@ module tb_disk_data;
 				repeat (6) @(posedge clk_74a);
 				tds_ack <= 1'b0;
 				tds_done <= 1'b0;
+				host_busy_req = 0;
 			end
 		join_none
 	end
@@ -280,9 +355,141 @@ module tb_disk_data;
 		end
 	endtask
 
-	// ---------------------------------------------------------------- stimulus
+
+	// ------------------------------------------- overtaken read (LBA A -> B)
+	// ki_ata's fetch_orphan flag exists for this shape: the Pocket's APF round
+	// trip is ~45 ms against a CPU that issues its next READ as soon as the
+	// previous one is drained, so a batch can be OVERTAKEN - the host still owes
+	// the core the sectors of a command the driver has already replaced. If
+	// those stale halfwords land in the new command's bank, the CPU reads another
+	// LBA's sectors (KI's record copy at LBA 12 never checksums and the game
+	// loops).
+	//
+	// The host really holds A: it is off the bridge until A has gone out, then
+	// answers A (with A's image) only after B's command byte. The CPU then drains
+	// B and every halfword is compared against LBAs lba_b .. lba_b+blk_b.
+	task overtaken_read(input integer lba_a, input integer blk_a,
+	                    input integer lba_b, input integer blk_b,
+	                    input integer delay_cyc, input integer word_gap);
+		integer r, vecblk, got_hw, want_hw, nsect, s_i, k, n, ncmp;
+		reg [31:0] rd;
+
+		begin
+			vecblk = 0;
+			for (r = 0; r < VEC_SECTORS; r = r + 1)
+				if (lba_of[r] == lba_b) vecblk = r;
+			nsect = blk_b + 1;
+
+			$display("  -- overtaken read: A=lba%0d x%0d, then B=lba%0d x%0d, host delay %0d, word gap %0d clk_74a",
+			         lba_a, nsect, lba_b, nsect, delay_cyc, word_gap);
+			host_reqs  = 0;
+			host_delay = 0;      // A is not delayed by time at first...
+			word_gap_m = word_gap;
+
+			// A: LBA registers, then READ SECTORS.
+			ata_write(32'h1000_0130, 32'h0000_00E0 | ((lba_a >> 24) & 32'hF));
+			ata_write(32'h1000_0128, 32'h0000_0000 | ((lba_a >> 16) & 32'hFF));
+			ata_write(32'h1000_0120, 32'h0000_0000 | ((lba_a >>  8) & 32'hFF));
+			ata_write(32'h1000_0118, 32'h0000_0000 | ( lba_a        & 32'hFF));
+			ata_write(32'h1000_0110, nsect);
+			ata_write(32'h1000_0138, 32'h20);
+
+			// ... but held off the bridge until the fetch engine has really put
+			// A on the wire, so the late answer is A's.
+			word_hold = 1;
+			n = 0;
+			while (!(sd_rd === 1'b1 && sd_ack === 1'b0) && n < 20000) begin
+				@(posedge clk); n = n + 1;
+			end
+			word_hold = 0;
+			$display("    A on the wire: sd_rd=%b state=%0d sd_ack=%b t=%0t",
+			         sd_rd, ata_state, sd_ack, $time);
+			// pk_io's S_DONE is level-sensitive, so the batch need not be latched
+			// on the cycle ki_ata pulses sd_rd: hold sd_rd for the bench only
+			// until the host has taken A, then hand the pin back to ki_ata (which
+			// is sitting in sd_ack waiting for exactly that answer).
+			if (host_reqs == 0) begin
+				@(posedge clk);
+				sd_rd_drv = 1'b1;
+				n = 0;
+				while (host_reqs == 0 && n < 20000) begin
+					@(posedge clk); n = n + 1;
+				end
+				@(posedge clk);
+				sd_rd_drv = 1'b0;
+			end
+			check("the overtaken batch was requested from the host", host_reqs == 1);
+			$display("    A held: sd_rd=%b sd_ack=%b reqs=%0d t=%0t", sd_rd, sd_ack, host_reqs, $time);
+
+			// B overtakes A, exactly as the driver does it: rewrite the LBA and
+			// count registers, then issue command 0x20 again. From here the host
+			// delay is armed, so A's answer and then B's are late by `delay_cyc`.
+			host_delay = delay_cyc;
+			ata_write(32'h1000_0130, 32'h0000_00E0 | ((lba_b >> 24) & 32'hF));
+			ata_write(32'h1000_0128, 32'h0000_0000 | ((lba_b >> 16) & 32'hFF));
+			ata_write(32'h1000_0120, 32'h0000_0000 | ((lba_b >>  8) & 32'hFF));
+			ata_write(32'h1000_0118, 32'h0000_0000 | ( lba_b        & 32'hFF));
+			ata_write(32'h1000_0110, nsect);
+			ata_write(32'h1000_0138, 32'h20);
+
+			// The host now answers A (its bytes are A's image) and then B.
+			n = 0;
+			while (host_reqs < 2 && n < 400000) begin
+				@(posedge clk); n = n + 1;
+			end
+			check("the new command was also requested from the host", host_reqs == 2);
+
+			n = 0;
+			rd = 32'h0;
+			while (((rd & 32'h58) != 32'h58) && n < 400000) begin
+				ata_read(32'h1000_0138, rd);
+				n = n + 1;
+			end
+			$display("    DRQ after the host answered: t=%0t status=%02x reqs=%0d",
+			         $time, rd[7:0], host_reqs);
+
+			// Drain the whole of B and compare every halfword against LBAs
+			// lba_b .. lba_b+blk_b.
+			scn_err = 0;
+			ncmp    = 0;
+			for (s_i = 0; s_i < nsect; s_i = s_i + 1) begin
+				n = 0;
+				rd = 32'h0;
+				while (((rd & 32'h58) != 32'h58) && n < 400000) begin
+					ata_read(32'h1000_0138, rd);
+					n = n + 1;
+				end
+				if (n >= 400000) begin
+					scn_err = scn_err + 1;
+					if (scn_err == 1)
+						$display("  first mismatch: sector %0d index - got no DRQ expected data",
+						         s_i);
+				end else begin
+					for (k = 0; k < HALFWORDS; k = k + 1) begin
+						ata_read(32'h1000_0100, rd);
+						got_hw  = rd[15:0];
+						want_hw = vec[(vecblk + s_i) * HALFWORDS + k];
+						ncmp    = ncmp + 1;
+						if (got_hw !== want_hw) begin
+							scn_err = scn_err + 1;
+							if (scn_err == 1)
+								$display("  first mismatch: sector %0d index %0d got %04x expected %04x",
+								         s_i, k, got_hw, want_hw);
+						end
+					end
+				end
+			end
+			$display("    drained %0d halfwords of lba%0d..%0d, %0d mismatched",
+			         ncmp, lba_b, lba_b + blk_b, scn_err);
+			check("every halfword of B equals the image",
+			      scn_err == 0 && ncmp == nsect * HALFWORDS);
+		end
+	endtask
+
+	// ---------------------------------------------------------------- stimulus	// ---------------------------------------------------------------- stimulus	// ---------------------------------------------------------------- stimulus
 	integer i;
 	initial begin
+		wait (vectors_ready === 1'b1);
 		// Load a small boot image so pk_io leaves S_SEL and reaches S_DONE.
 		#200 loader_reset = 0;
 		#200;
@@ -306,6 +513,8 @@ module tb_disk_data;
 		check("ATA reports the image ready", ata_image_ready === 1'b1);
 		$display("  img_size=%0d image_ready=%b", img_size, ata_image_ready);
 
+		scn_err = 0;
+		if (!loader_abort) begin
 		// 1. Single sector - the shape the game's boot check uses (count=1).
 		read_and_check(1,      1, 1);
 		check("LBA 1 equals the image", bad == 0);
@@ -328,6 +537,16 @@ module tb_disk_data;
 		// 5. Both sectors back to back, as the game does them.
 		read_and_check(0,     12, 0);
 		check("12-sector read, both banks twice", bad == 0);
+
+		// 6. The overtaken read: a batch the host answers only after the next
+		//    command has superseded it. The drain must carry B's sectors and
+		//    nothing of A's.
+		overtaken_read(5, 6, 12, 6, HOST_DELAY_CYCLES, HOST_WORD_GAP);
+		check("overtaken read: drain is B's image, not A's", scn_err == 0);
+		$display("%0s", (scn_err == 0) ? "PASS_OVERTAKEN_READ" : "FAIL_OVERTAKEN_READ");
+		end else begin
+			$display("  (loader aborted: overtaken-read scenario skipped)");
+		end
 
 		if (errors == 0) $display("PASS_DISK_DATA");
 		else             $display("FAIL_DISK_DATA (%0d)", errors);

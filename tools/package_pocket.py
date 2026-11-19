@@ -3,7 +3,7 @@
 Assemble a release package for Analogue Pocket SD card deployment.
 Generates bitstream.rbf_r (bit-reversed per APF requirement) and structures:
   Release/
-    Cores/littleinstinct.KillerInstinct/
+    Cores/danimanx.KillerInstinct/
       bitstream.rbf_r
       core.json
       data.json
@@ -13,7 +13,7 @@ Generates bitstream.rbf_r (bit-reversed per APF requirement) and structures:
     Assets/killerinstinct/
       common/
         README.txt
-      littleinstinct.KillerInstinct/
+      danimanx.KillerInstinct/
         Killer Instinct (v1.5d).json
         Killer Instinct 2 (v1.4).json
 
@@ -65,7 +65,7 @@ def main():
     os.makedirs(sd_root, exist_ok=True)
 
     # Copy APF directories
-    core_id = "littleinstinct.KillerInstinct"
+    core_id = "danimanx.KillerInstinct"
     cores_dir = os.path.join(sd_root, "Cores", core_id)
     platforms_dir = os.path.join(sd_root, "Platforms")
     assets_dir = os.path.join(sd_root, "Assets", "killerinstinct", core_id)

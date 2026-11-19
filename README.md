@@ -82,7 +82,7 @@ aleatorios, ~3 millones de ciclos por corrida, sin diferencias).
    cualquier esquina o si Quartus ignoró una constraint. No empaquetar un
    build que no pase esa puerta, y no añadir `set_clock_groups` entre relojes
    del PLL para hacerla pasar: ese fue el error de v1.0.17.
-5. **Subir versión** en `apf/Cores/littleinstinct.KillerInstinct/core.json`
+5. **Subir versión** en `apf/Cores/danimanx.KillerInstinct/core.json`
    antes de empaquetar; el zip toma el número de ahí.
 
 Hay ahora 4.787 ALMs libres (26 %). Lo que antes no cabía (FPU, caché de
@@ -122,9 +122,9 @@ docs/ADSP_SUBSET.md                      which opcodes the DCS firmware really r
                                          and what deleting the rest is worth
 docs/dcs_subset.json                     that subset, machine-readable
 tools/measure/dcs_opcodes.py             derives it from the sound ROM
-apf/Cores/littleinstinct.KillerInstinct/ core.json, data.json, info.txt
+apf/Cores/danimanx.KillerInstinct/ core.json, data.json, info.txt
 apf/Platforms/killerinstinct.json
-apf/Assets/killerinstinct/littleinstinct.KillerInstinct/
+apf/Assets/killerinstinct/danimanx.KillerInstinct/
                                          one JSON per game
 tools/build_pocket.sh                    Quartus compile -> pocket_ki.rbf, then the gate
 tools/check_fit.py                       release gate: PLL, slack, ignored constraints
@@ -204,7 +204,7 @@ To fit the system within the Cyclone V's **18,480 ALMs / 1,848 LABs** and reach 
 
 #### IDE HDD Replacement via APF Deferred Data Slot Streaming (`src/fpga/pocket_rtl/pk_io.sv`)
 
-Instead of pre-loading the 130 MB `.img` file into RAM at boot, `apf/Cores/littleinstinct.KillerInstinct/data.json` configures **Slot 2 (`"id": 2`)** with `"deferload": true` at bridge address `0x4000_0000`.
+Instead of pre-loading the 130 MB `.img` file into RAM at boot, `apf/Cores/danimanx.KillerInstinct/data.json` configures **Slot 2 (`"id": 2`)** with `"deferload": true` at bridge address `0x4000_0000`.
 
 ```mermaid
 sequenceDiagram
@@ -302,17 +302,17 @@ tools/check_setup.py roms/
 A pre-packaged archive ready to extract directly to the microSD card root is provided in `Release/LittleInstinct_Pocket_v<version>.zip`:
 
 ```
-Cores/littleinstinct.KillerInstinct/{core,data}.json, info.txt
-Cores/littleinstinct.KillerInstinct/icon.bin
-Cores/littleinstinct.KillerInstinct/bitstream.rbf_r
+Cores/danimanx.KillerInstinct/{core,data}.json, info.txt
+Cores/danimanx.KillerInstinct/icon.bin
+Cores/danimanx.KillerInstinct/bitstream.rbf_r
 Platforms/killerinstinct.json
 Platforms/_images/killerinstinct.bin
 Assets/killerinstinct/common/kinst.rom
 Assets/killerinstinct/common/kinst.img
 Assets/killerinstinct/common/kinst2.rom
 Assets/killerinstinct/common/kinst2.img
-Assets/killerinstinct/littleinstinct.KillerInstinct/Killer Instinct (v1.5d).json
-Assets/killerinstinct/littleinstinct.KillerInstinct/Killer Instinct 2 (v1.4).json
+Assets/killerinstinct/danimanx.KillerInstinct/Killer Instinct (v1.5d).json
+Assets/killerinstinct/danimanx.KillerInstinct/Killer Instinct 2 (v1.4).json
 ```
 
 ## Licenses
@@ -334,6 +334,7 @@ Registro de errores de inicialización del framework APF detectados en hardware 
   2. El Slot 1 de ROM en `data.json` tenía el Bit 1 activo (`0x10A`), forzando la búsqueda en la carpeta específica del core en lugar de `Assets/killerinstinct/common/`.
 - **Solución aplicada:**
   - Ajustado `"author": "littleinstinct"` en `core.json`.
+  - **v1.1.18:** el autor vuelve a ser `danimanx` (igual que los otros cores del autor) y las carpetas pasan a `Cores/danimanx.KillerInstinct/` y `Assets/killerinstinct/danimanx.KillerInstinct/`, de modo que autor y carpeta coinciden. Al actualizar una SD con la versión anterior, borrar o renombrar las carpetas `littleinstinct.KillerInstinct` viejas.
   - Corregido Slot 1 a `"parameters": "0x108"` en `data.json` (modo archivo común de plataforma + sólo lectura, idéntico al estándar de Jotego).
 
 ### 2. `Load error in 'variants'. General error. Error in core setup`
@@ -426,7 +427,7 @@ git pull origin master
 python3 tools/package_pocket.py
 
 # 4. Copiar el bitstream corregido a la MicroSD:
-cp Release/sd_card/Cores/littleinstinct.KillerInstinct/bitstream.rbf_r /media/$USER/*/Cores/littleinstinct.KillerInstinct/
+cp Release/sd_card/Cores/danimanx.KillerInstinct/bitstream.rbf_r /media/$USER/*/Cores/danimanx.KillerInstinct/
 ```
 
 

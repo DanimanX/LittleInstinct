@@ -511,6 +511,7 @@ ki_pocket_top iki (
     .apf_reset_n                ( reset_n ),
 
     .bridge_addr                ( bridge_addr ),
+    .bridge_rd                  ( bridge_rd ),
     .bridge_wr                  ( bridge_wr ),
     .bridge_wr_data             ( bridge_wr_data ),
 

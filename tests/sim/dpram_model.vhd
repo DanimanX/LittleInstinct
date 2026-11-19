@@ -128,30 +128,43 @@ entity dpram_dif is
 end entity;
 
 architecture sim of dpram_dif is
-   -- The wider of the two organisations sizes the array; a design that gives
-   -- the ports different widths reads the same words through both.
-   -- VHDL has no ternary: "a > b and a or b" mixes and/or around a relation
-   -- and is illegal, and integer'max is not available here either.
-   function imax(a, b : integer) return integer is
+   -- A true mixed-width RAM: one store of 2**addr_width_a * data_width_a bits
+   -- seen through two organisations. Altera's convention for altsyncram with
+   -- different port widths: the narrow port's LOWER address holds the wide
+   -- word's LOW bits. (The previous model indexed both ports into one array by
+   -- their own address, so cpu_instrcache's 32-bit reads of its 64-bit fills
+   -- returned the wrong words and cached code never decoded in simulation -
+   -- the boot ROM runs uncached, which is why tb_cpu_boot never noticed.)
+   function imin(a, b : integer) return integer is
    begin
-      if a > b then return a; else return b; end if;
+      if a < b then return a; else return b; end if;
    end function;
-   constant AW : integer := imax(addr_width_a, addr_width_b);
-   constant DW : integer := imax(data_width_a, data_width_b);
-   type mem_t is array (0 to 2**AW - 1) of std_logic_vector(DW-1 downto 0);
+   constant U   : integer := imin(data_width_a, data_width_b);  -- unit width
+   constant RA  : integer := data_width_a / U;
+   constant RB  : integer := data_width_b / U;
+   constant N   : integer := (2**addr_width_a) * RA;             -- units
+   type mem_t is array (0 to N - 1) of std_logic_vector(U-1 downto 0);
 begin
    dual : process (clock_a, clock_b, address_a, cs_a, cs_b)
       variable mem  : mem_t := (others => (others => '0'));
-      variable ra_b : integer range 0 to 2**AW - 1 := 0;
+      variable ra_b : integer := 0;
       variable ia   : integer;
       variable ib   : integer;
+      variable qa   : std_logic_vector(data_width_a-1 downto 0);
+      variable qb   : std_logic_vector(data_width_b-1 downto 0);
    begin
       if rising_edge(clock_a) and clken_a = '1' and wren_a = '1' and cs_a = '1' then
          ia := to_integer(unsigned(address_a));
-         mem(ia)(data_width_a-1 downto 0) := data_a;
+         for k in 0 to RA - 1 loop
+            mem((ia * RA + k) mod N) := data_a(k * U + U - 1 downto k * U);
+         end loop;
       end if;
       if cs_a = '1' then
-         q_a <= mem(to_integer(unsigned(address_a)))(data_width_a-1 downto 0);
+         ia := to_integer(unsigned(address_a));
+         for k in 0 to RA - 1 loop
+            qa(k * U + U - 1 downto k * U) := mem((ia * RA + k) mod N);
+         end loop;
+         q_a <= qa;
       else
          q_a <= (others => '1');
       end if;
@@ -159,12 +172,17 @@ begin
       if rising_edge(clock_b) and clken_b = '1' then
          ib := to_integer(unsigned(address_b));
          if wren_b = '1' and cs_b = '1' then
-            mem(ib)(data_width_b-1 downto 0) := data_b;
+            for k in 0 to RB - 1 loop
+               mem((ib * RB + k) mod N) := data_b(k * U + U - 1 downto k * U);
+            end loop;
          end if;
          ra_b := ib;
       end if;
       if cs_b = '1' then
-         q_b <= mem(ra_b)(data_width_b-1 downto 0);
+         for k in 0 to RB - 1 loop
+            qb(k * U + U - 1 downto k * U) := mem((ra_b * RB + k) mod N);
+         end loop;
+         q_b <= qb;
       else
          q_b <= (others => '1');
       end if;

@@ -46,7 +46,8 @@ done
 
 "$GHDL" -a --workdir=. -P. -Pmem --std=08 "$CORE/cpu/cpu_instrcache.vhd"
 "$GHDL" -a --workdir=. -P. -Pmem --std=08 "$R/src/fpga/pocket_rtl/cpu/cpu_datacache.vhd"
-"$GHDL" -a --workdir=. -P. -Pmem --std=08 "$R/src/fpga/pocket_rtl/cpu/cpu_FPU_stub.vhd"
+"$GHDL" -a --workdir=. -P. -Pmem --std=08 "$CORE/cpu/cpu_FPU_sqrt.vhd"
+"$GHDL" -a --workdir=. -P. -Pmem --std=08 "$CORE/cpu/cpu_FPU.vhd"
 "$GHDL" -a --workdir=. -P. -Pmem --std=08 "$R/src/fpga/pocket_rtl/cpu/cpu_pocket.vhd"
 "$GHDL" -a --workdir=. -P. -Pmem --std=08 "$CORE/ki_cpu_core.vhd"
 "$GHDL" -a --workdir=. -P. -Pmem --std=08 "$R/tests/sim/tb_cpu_boot.vhd"

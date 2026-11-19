@@ -25,6 +25,7 @@ module ki_pocket_top (
 
 	// APF bridge (the ROM slot and deferred disk sector reads arrive here)
 	input  wire [31:0] bridge_addr,
+	input  wire        bridge_rd,
 	input  wire        bridge_wr,
 	input  wire [31:0] bridge_wr_data,
 
@@ -144,6 +145,7 @@ module ki_pocket_top (
 
 		.clk_74a                    (clk_74a),
 		.bridge_addr                (bridge_addr),
+		.bridge_rd                  (bridge_rd),
 		.bridge_wr                  (bridge_wr),
 		.bridge_wr_data             (bridge_wr_data),
 		.dataslot_update            (dataslot_update),
