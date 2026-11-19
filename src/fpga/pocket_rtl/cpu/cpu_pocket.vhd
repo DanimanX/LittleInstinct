@@ -783,6 +783,11 @@ architecture arch of cpu is
    -- or its issue pending. See the request-preserving blocks.
    signal datacache_wb_sched           : std_logic;
    signal datacache_debug_state        : std_logic_vector(4 downto 0);
+   signal dc_b_we                      : std_logic_vector(1 downto 0);
+   signal dc_b_addr                    : std_logic_vector(9 downto 0);
+   signal dc_b_data                    : std_logic_vector(63 downto 0);
+   signal dc_b_be                      : std_logic_vector(7 downto 0);
+   signal dc_b_src                     : std_logic_vector(1 downto 0);
           
    -- The transaction FIFO belongs entirely to clk93.  Transfer its wide
    -- payload to clk1x through a bundled-data request/acknowledge mailbox so
@@ -1971,13 +1976,11 @@ begin
       -- (0808C200) read 8808C1FC from a hit. Did a refill bring it from
       -- SDRAM? clk1x side: the first fill whose beat 0 is word 0 of an
       -- object (line 0 of 0808BC00..0808DB00) with byte 0 > 32.
-      signal f_line   : unsigned(31 downto 0) := (others => '0');
-      signal f_beat   : unsigned(1 downto 0) := (others => '0');
       signal fb_valid : std_logic := '0';
       signal fb_addr  : std_logic_vector(31 downto 0) := (others => '0');
       signal fb_data  : std_logic_vector(63 downto 0) := (others => '0');
-      signal fo_cnt   : unsigned(15 downto 0) := (others => '0');
       signal fo_bad   : unsigned(7 downto 0) := (others => '0');
+      signal fb_info  : std_logic_vector(23 downto 0) := (others => '0');
       signal ob_cnt   : unsigned(7 downto 0) := (others => '0');
       -- V209: V208 saw no store of a mode > 32 (126 stores, last 02), yet
       -- the dispatcher's `lbu a2,0(fp)` at 88002060 (fp = 8808BC00) got
@@ -2295,6 +2298,9 @@ begin
       -- line, row 9 tail = {bad fills, 0, fills of an object's line 0},
       -- row 10 tail = bad load address, row 12 tail = the bad load's word.
       debug_stack_probe1 <= x_dc(31 downto 0);
+      -- V213: S2 = PC (prof_pc2) at the bad port-B write, S3 = the word,
+      -- row 8 tail = datacache_addr then, row 9 tail = {count, be, src(2),
+      -- stall4, replay, we(2), RAM index(10) = address bits 12..3}.
       debug_stack_probe2 <= fb_data(31 downto 0);
       -- V187 screen, all frozen with the rest at the fault departure:
       --   S3  (row 11)       intruder's address if FL[10], else the V185 slot
@@ -2312,7 +2318,7 @@ begin
       debug_array_data   <= c_data;
       -- V189: with no intruder, the row-9 tail is {sectors checked, checksum
       -- mismatches}, both saturating, both live.
-      debug_array_pc     <= std_logic_vector(fo_bad) & x"00" & std_logic_vector(fo_cnt);  -- V212
+      debug_array_pc     <= std_logic_vector(fo_bad) & fb_info;  -- V213
 
       process (clk93)
       begin
@@ -2484,30 +2490,37 @@ begin
             end if;
          end if;
       end process;
-      -- V212: fills of an object's line 0 (clk1x, where the fill beats are).
-      -- Frozen values are read by the overlay long after; quasi-static.
-      process (clk1x)
+      -- V213: V212 saw no fill bring an 8808xxFC value (0 bad of 0x2478
+      -- object fills), V211 no execute-stage store carrying one. Watch the
+      -- data RAMs' port B itself: the first write of such a word, whatever
+      -- the source (write_data_rot, write_data_1 under stall4, replay).
+      process (clk93)
+         variable m_lo, m_hi : boolean;
       begin
-         if rising_edge(clk1x) then
-            if (datacache_request = '1') then
-               f_line <= datacache_reqAddr;
-               f_beat <= (others => '0');
-            end if;
-            if (datacache_active = '1' and dc_ready = '1') then
-               f_beat <= f_beat + 1;
-               if (f_beat = "00" and
-                   f_line(27 downto 16) = x"808" and
-                   f_line(15 downto 8) >= x"BC" and f_line(15 downto 8) <= x"DB" and
-                   f_line(7 downto 5) = "000") then
-                  if (fo_cnt /= x"FFFF") then fo_cnt <= fo_cnt + 1; end if;
-                  if (unsigned(dc_dout(7 downto 0)) > 32) then
-                     if (fo_bad /= x"FF") then fo_bad <= fo_bad + 1; end if;
-                     if (fb_valid = '0') then
-                        fb_valid <= '1';
-                        fb_addr  <= std_logic_vector(f_line);
-                        fb_data  <= dc_dout;
-                     end if;
+         if rising_edge(clk93) then
+            m_lo := dc_b_be(0) = '1' and dc_b_data(31 downto 16) = x"8808" and
+                    dc_b_data(7 downto 0) = x"FC" and
+                    unsigned(dc_b_data(15 downto 8)) >= 16#BB# and
+                    unsigned(dc_b_data(15 downto 8)) <= 16#DB#;
+            m_hi := dc_b_be(4) = '1' and dc_b_data(63 downto 48) = x"8808" and
+                    dc_b_data(39 downto 32) = x"FC" and
+                    unsigned(dc_b_data(47 downto 40)) >= 16#BB# and
+                    unsigned(dc_b_data(47 downto 40)) <= 16#DB#;
+            if (dc_b_we /= "00" and (m_lo or m_hi)) then
+               if (fo_bad /= x"FF") then fo_bad <= fo_bad + 1; end if;
+               if (fb_valid = '0') then
+                  fb_valid <= '1';
+                  fb_addr  <= std_logic_vector(datacache_addr);
+                  fb_data(31 downto 0) <= prof_pc2;
+                  if (m_lo) then
+                     fb_data(63 downto 32) <= dc_b_data(31 downto 0);
+                  else
+                     fb_data(63 downto 32) <= dc_b_data(63 downto 32);
                   end if;
+                  fb_info  <= dc_b_be & dc_b_src & stall4 &
+                              (writeback_fifoStall and fifoStall_useCache and
+                               writefifo_mem4_ready) &
+                              dc_b_we & dc_b_addr;
                end if;
             end if;
          end if;
@@ -6164,6 +6177,11 @@ begin
 
       clear_busy        => datacache_clear_busy,
       debug_state       => datacache_debug_state,
+      dbg_b_we          => dc_b_we,
+      dbg_b_addr        => dc_b_addr,
+      dbg_b_data        => dc_b_data,
+      dbg_b_be          => dc_b_be,
+      dbg_b_src         => dc_b_src,
       perf_miss         => datacache_perf_miss,
       perf_miss_low     => datacache_perf_miss_low,
       perf_miss_fb      => datacache_perf_miss_fb,
