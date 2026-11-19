@@ -1718,10 +1718,16 @@ module ki_memory_bridge #(
   assign ddram_be       = 8'd0;
   assign ddram_we       = 1'b0;
 
-  // Disable direct fast fill bypass on Pocket: VID_ISSUE and DCS_ROM_READ_ISSUE
-  // share ki_sdram_burst through this bridge, so all CPU SDRAM requests must be
-  // serialized through IDLE rather than bypassing the bridge via fast_tog.
-  assign fast_ok = 1'b0;
+  // V219: the direct fill path, as upstream's bridge allows it, but only in
+  // IDLE. Video (VID_ISSUE), the DCS ROM and framebuffer line writes all reach
+  // ki_sdram_burst through this bridge here, so FB_LINE_WRITE - which upstream
+  // could overlap with a fill, its framebuffer being on-chip - is excluded.
+  // The controller itself never takes fast_tog while a bridge request is
+  // pending or new (fast_take), and the adapter's done comes only from its
+  // own ADAPTER_WAIT, so a direct fill cannot be mistaken for the bridge's.
+  assign fast_ok = !reset && (state == IDLE) && !cpu_pending &&
+                   (wb_count == 3'd0) && !done_owed && !fill_tail &&
+                   (download_count == 5'd0) && !cpu_hold;
 
   // sdram_read is a one-cycle registered pulse in the state machine above, so
   // reading it here sees the previous cycle's value - still exactly one count

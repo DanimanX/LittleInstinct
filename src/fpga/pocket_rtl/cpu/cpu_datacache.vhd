@@ -159,14 +159,6 @@ entity cpu_datacache is
       -- so cpu.vhd holds the first fetch until it falls (boot_hold).
       clear_busy        : out std_logic;
       debug_state       : out std_logic_vector(4 downto 0) := (others => '0');
-      -- V213: the data RAMs' port B (every store-side write) as it is
-      -- written. src: 00 write_data_rot, 01 write_data_1 (stall4),
-      -- 10 store buffer, 11 FILLRA_COPY.
-      dbg_b_we          : out std_logic_vector(1 downto 0);
-      dbg_b_addr        : out std_logic_vector(9 downto 0);
-      dbg_b_data        : out std_logic_vector(63 downto 0);
-      dbg_b_be          : out std_logic_vector(7 downto 0);
-      dbg_b_src         : out std_logic_vector(1 downto 0);
       -- Why stage 4 is waiting on this cache, for the stall census. These
       -- separate the two causes of DC - stall4 on a CACHED access - which
       -- have opposite fixes: the cache queued behind another bus master, or
@@ -811,13 +803,6 @@ architecture arch of cpu_datacache is
 begin
 
    debug_state <= std_logic_vector(to_unsigned(tState'pos(state), 5));
-   dbg_b_we    <= cache_we_w;
-   dbg_b_addr  <= cache_address_b;
-   dbg_b_data  <= cache_data_b;
-   dbg_b_be    <= cache_be_b;
-   dbg_b_src   <= "11" when (state = FILLRA_COPY) else
-                  "10" when (sb_drain = '1') else
-                  "01" when (stall4 = '1') else "00";
    clear_busy  <= '1' when (state = CLEARCACHE) else '0';
    fill_last_q <= '1' when (tag_read_addr(4 downto 3) = (fill_start xor "11")) else '0';
    -- Not for a miss served from the read-ahead copy: its line asks nothing

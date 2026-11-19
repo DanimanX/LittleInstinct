@@ -1335,7 +1335,9 @@ ki_cpu_core #(
 	.DCACHE_READ_AHEAD(0),
 	.DCACHE_RA_ANSWER(0),
 	.DCACHE_EARLY_RESTART(0),
-	.DIRECT_FILL(0)
+	// V219: clean D-cache misses straight to ki_sdram_burst's second port
+	// when the bridge is idle (fast_ok). Needs SYNC_CROSSING (V218).
+	.DIRECT_FILL(1)
 ) cpu
 (
 	.clk1x(clk_core),
