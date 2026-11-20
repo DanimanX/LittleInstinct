@@ -1342,10 +1342,13 @@ ki_cpu_core #(
 	// in a buffer (a later load reads it) instead of writing the RAM that
 	// cycle, which also takes the tag RAM off the cache write-enable path.
 	// V229 (all three on) hung at boot: PC 8802DBD0, I=0, blue screen.
-	// V230 bisects: WB_EARLY alone.
+	// 73d38f3's timing edits in cpu_datacache.vhd had broken the store
+	// buffer (a store to the parked qword index in the other way was lost;
+	// a load the buffer could not forward read the RAM without the store).
+	// V231 fixes both and turns the buffer back on.
 	.DCACHE_WB_EARLY(1),
-	.DCACHE_STORE_BUFFER(0),
-	.DCACHE_SB_FORWARD(0),
+	.DCACHE_STORE_BUFFER(1),
+	.DCACHE_SB_FORWARD(1),
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
 	.DCACHE_FILL_AT_MISS(0),

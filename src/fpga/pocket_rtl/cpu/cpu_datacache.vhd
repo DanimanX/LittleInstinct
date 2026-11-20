@@ -714,6 +714,8 @@ architecture arch of cpu_datacache is
    signal sb_rd_ok         : std_logic;
    signal st_direct_a      : std_logic;   -- a store in IDLE may write the RAMs itself
    signal st_direct_we     : std_logic;
+   signal st_direct_w0     : std_logic;   -- st_direct_we for a store that hit way 0
+   signal st_direct_w1     : std_logic;   -- st_direct_we for a store that hit way 1
    -- synthesis translate_off
    signal ram_rd_1         : std_logic_vector(IDX_HI - 3 downto 0) := (others => '0');
    -- synthesis translate_on
@@ -1290,7 +1292,15 @@ begin
    sb_same     <= '1' when (STORE_BUFFER and sb_valid = '1' and
                             sb_addr = tag_addr_1(IDX_HI downto 3)) else '0';
    st_direct_a <= '1' when (not STORE_BUFFER or sb_ok = '0' or sb_same = '1') else '0';
+   -- st_direct_we: upstream's "sb_park = '0' and sb_merge = '0'" for a store
+   -- that hit way w reduces to: no buffer, or the buffer holds this qword
+   -- index in the OTHER way (park needs sb_same = 0, merge needs the same
+   -- way). 73d38f3 dropped that second case to keep the tag compare off the
+   -- write enables, which silently lost such a store; hit_w(w) already names
+   -- the way, so the per-way form below needs no tag compare (V229 hang).
    st_direct_we <= '1' when (not STORE_BUFFER or sb_ok = '0') else '0';
+   st_direct_w0 <= '1' when (st_direct_we = '1' or (sb_same = '1' and sb_way = '1')) else '0';
+   st_direct_w1 <= '1' when (st_direct_we = '1' or (sb_same = '1' and sb_way = '0')) else '0';
    sb_park     <= '1' when (state = IDLE and write_ena = '1' and read_hit = '1' and sb_ok = '1' and
                             tail_blk = '0' and (sb_valid = '0' or sb_same = '0')) else '0';
    sb_merge    <= '1' when (state = IDLE and write_ena = '1' and read_hit = '1' and sb_ok = '1' and
@@ -1299,7 +1309,16 @@ begin
                               ((read_ena = '0' and write_ena = '0' and CacheCommandEna = '0' and
                                 ce_fetch = '1' and next_load = '0') or
                                (write_ena = '1' and sb_ok = '1' and sb_same = '0') or
-                               (read_ena = '1' and sb_same = '1' and sb_fwd_sel = '0') or
+                               -- upstream drains when sb_fwd = '0'. 73d38f3 used
+                               -- sb_fwd_sel alone (no tag compare), which left the
+                               -- buffer parked when sb_rd_ok, slow_on or tail_blk
+                               -- stopped the forward, and READWAIT then read the
+                               -- RAM without the store. The terms below are all
+                               -- registers; read_hit/fast_hit = 0 cases fill or
+                               -- read another way, as upstream.
+                               (read_ena = '1' and sb_same = '1' and
+                                (sb_fwd_sel = '0' or sb_rd_ok = '0' or slow_on = '1' or
+                                 tail_blk = '1')) or
                                CacheCommandEna = '1')) else '0';
    sb_drain    <= '1' when (sb_drain_idle = '1' or
                             (STORE_BUFFER and sb_valid = '1' and
@@ -1345,7 +1364,7 @@ begin
    -- A store writes the way that hit; the store that caused a fill writes the
    -- filled way once the line is in, and a store that skipped it in ALLOC.
    cache_we_w(0)   <= '1' when ((state = IDLE and hit_w(0) = '1' and write_ena = '1' and
-                                 st_direct_we = '1' and tail_blk = '0') or
+                                 st_direct_w0 = '1' and tail_blk = '0') or
                                 (state = TAIL_STORE and data_way = '0') or
                                 (sb_drain = '1' and sb_way = '0') or
                                 (writeMode = '1' and state = FILL and fill_done_mine = '1' and
@@ -1355,7 +1374,7 @@ begin
                                 (writeMode = '1' and state = FILLRA_DONE and
                                  data_way = '0')) else '0';
    cache_we_w(1)   <= '1' when ((state = IDLE and hit_w(1) = '1' and write_ena = '1' and
-                                 st_direct_we = '1' and tail_blk = '0') or
+                                 st_direct_w1 = '1' and tail_blk = '0') or
                                 (state = TAIL_STORE and data_way = '1') or
                                 (sb_drain = '1' and sb_way = '1') or
                                 (writeMode = '1' and state = FILL and fill_done_mine = '1' and
