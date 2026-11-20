@@ -1335,7 +1335,10 @@ ki_cpu_core #(
 	.DCACHE_FILL_AT_MISS(0),
 	.DCACHE_READ_AHEAD(0),
 	.DCACHE_RA_ANSWER(0),
-	.DCACHE_EARLY_RESTART(0),
+	// V223: a load miss answers as soon as its own qword is in (V222: a miss
+	// still pays ~10 cycles of line + ~3 of done after its first beat).
+	// Upstream's default; off on the Pocket since bring-up (ae1efd0).
+	.DCACHE_EARLY_RESTART(1),
 	// V219: clean D-cache misses straight to ki_sdram_burst's second port
 	// when the bridge is idle (fast_ok). Needs SYNC_CROSSING (V218).
 	.DIRECT_FILL(1)
