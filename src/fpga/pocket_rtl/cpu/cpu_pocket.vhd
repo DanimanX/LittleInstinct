@@ -2201,9 +2201,12 @@ begin
 
    -- V221: three fields that read ~0 in a fight are lent to the miss
    -- breakdown: UW = cycles writing back a dirty victim, UO = cycles in FILL
-   -- before its first beat, DI = cycles in FILL with every beat in, waiting
-   -- for ram_done. UF counts direct fills (V220).
-   debug_perf_events <= datacache_perf_fill_hold &        -- 11 DI (V221)
+   -- before its first beat. UF counts direct fills (V220).
+   -- V222: DI = cycles in FILL before the first beat while a direct fill is
+   -- out (fast_busy, not a read-ahead or uncached one): UO - DI is the
+   -- bridge path's share of the first-beat wait.
+   debug_perf_events <= (datacache_perf_fill_wait and fast_busy and
+                         not fast_is_ra_r and not fast_is_unc_r) & -- 11 DI (V222)
                         datacache_perf_miss_low &         -- 10 LM
                         perf_lost_lb &                    -- 9 LB
                         perf_lost_s1 &                    -- 8 S1
