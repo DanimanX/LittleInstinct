@@ -477,7 +477,13 @@ module ki_memory_bridge #(
   // (tests/sim/tb_cpu_line_fills.sv), so the guard is invisible in normal
   // operation and only fires on a genuinely repeating requester.
   logic [6:0] cpu_wait = 7'd0;      // saturating cycles the CPU has had a request waiting
-  wire        cpu_starved = cpu_turn && cpu_wait[6];
+  // V232: the CPU now outranks scanout and the DCS ROM after 4 cycles, not
+  // 64. Scanout has ~3,200 clk_core cycles per line for its 20 bursts and
+  // the DCS PCM FIFO holds ~65 ms, so neither needs the CPU to wait; V231's
+  // census still puts ~0620 x 256 cycles of each fight frame in D-cache
+  // stall. cpu_wait resets once the CPU is served, so video and DCS still
+  // get the bridge between CPU requests.
+  wire        cpu_starved = cpu_turn && cpu_wait[2];
 
   // Debug: what the bridge last did for the CPU port, and the worst it ever
   // made the CPU wait. See the port's comment for the bit layout.
