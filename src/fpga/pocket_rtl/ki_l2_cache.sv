@@ -40,7 +40,15 @@
 //   - Setting L2_ENABLE=0 removes the cache and restores a pure wire-through
 //     for hardware bisecting.
 module ki_l2_cache #(
-  parameter bit L2_ENABLE = 1'b1
+  parameter bit L2_ENABLE = 1'b1,
+  // V235: 0 = the CPU's direct-fill port passes straight through, exactly as
+  // without this module, and the L2 serves the bridge path only. V234 with
+  // the direct path through the L2 hung (ERR 02): the CPU launches a direct
+  // fill only while the bridge is idle, and ki_sdram_burst relies on that
+  // toggle arriving before the bridge's next request can; the lookup cycles
+  // here delayed it until a bridge request could land on the same edge, and
+  // ki_sdram_burst's new_rd then overwrote the direct request (lost for good).
+  parameter bit L2_FAST   = 1'b0
 ) (
   input  wire         clk,               // clk_core (50 MHz)
   input  wire         reset,             // sdram_init_reset (resets adapter link)
@@ -225,6 +233,23 @@ module ki_l2_cache #(
 
       wire  [10:0] br_req_idx           = br_req_addr[14:4];
 
+      // V234 fix (first hardware run hung with ERR 02, error_stall): the
+      // bridge closes a line read on its one-but-last beat and returns to
+      // IDLE with done_owed set, so it may issue its NEXT request (scanout,
+      // DCS ROM, a write-back) while this module is still streaming a hit
+      // (BR_HIT_STREAM/BR_HIT_DONE) or finishing a miss (BR_MISS_WAIT).
+      // The adapter queues such a request; this module used to look at
+      // bridge_read/bridge_write only in BR_IDLE and dropped it, and the
+      // bridge then waited forever for its done. One request can be
+      // outstanding (the bridge waits for its done before the next), so a
+      // one-deep pending flag is enough: it is replayed in BR_IDLE. Address,
+      // burst, data and byte enables are registers in the bridge that hold
+      // until that request's done, so they need no copy here.
+      logic        br_pend_rd           = 1'b0;
+      logic        br_pend_wr           = 1'b0;
+      wire         br_req_read          = bridge_read  || br_pend_rd;
+      wire         br_req_write         = bridge_write || br_pend_wr;
+
       // ----------------------------------------------------------------------
       // M10K storage (66 explicit altsyncram M10Ks under synthesis)
       // ----------------------------------------------------------------------
@@ -277,7 +302,7 @@ module ki_l2_cache #(
 
       // Any main-RAM bridge write invalidates its L2 index immediately.
       wire br_inv_now = cache_active && (br_state == BR_IDLE) &&
-                        bridge_write && br_in_is_main;
+                        br_req_write && br_in_is_main;
 
       // Read Port B ownership. A waiting bridge read (BR_WAIT_PORT) outranks a
       // newly arriving direct fill so neither path can starve.
@@ -287,14 +312,14 @@ module ki_l2_cache #(
                             (br_state == BR_HIT_WAIT_DONE) ||
                             (br_state == BR_HIT_STREAM);
 
-      wire fast_req_new     = (cpu_fast_req_tog != fast_rseen) && !fast_cooldown;
+      wire fast_req_new     = L2_FAST && (cpu_fast_req_tog != fast_rseen) && !fast_cooldown;
       wire fast_rd_start    = (fast_state == FAST_IDLE) && fast_req_new &&
                               fast_in_is_main && cache_active &&
                               !br_port_busy && (br_state != BR_WAIT_PORT);
       wire fast_bypass_start = (fast_state == FAST_IDLE) && fast_req_new &&
                                (!fast_in_is_main || !cache_active);
 
-      wire br_rd_start_idle = (br_state == BR_IDLE) && bridge_read &&
+      wire br_rd_start_idle = (br_state == BR_IDLE) && br_req_read &&
                               br_in_eligible && !fast_port_busy && !fast_rd_start;
       wire br_rd_start_wait = (br_state == BR_WAIT_PORT) &&
                               !fast_port_busy && !fast_rd_start;
@@ -421,8 +446,8 @@ module ki_l2_cache #(
       // through without adding 288 holding registers in the L2.
       assign sdram_write_data  = bridge_write_data;
       assign sdram_byte_enable = bridge_byte_enable;
-      assign sdram_write       = (br_state == BR_IDLE) ? bridge_write : 1'b0;
-      assign sdram_read        = (br_state == BR_IDLE)   ? (bridge_read && !br_in_eligible) :
+      assign sdram_write       = (br_state == BR_IDLE) ? br_req_write : 1'b0;
+      assign sdram_read        = (br_state == BR_IDLE)   ? (br_req_read && !br_in_eligible) :
                                  (br_state == BR_LOOKUP) ? !br_hit :
                                  1'b0;
       assign sdram_address     = (br_state == BR_LOOKUP) ? br_req_addr : bridge_address;
@@ -444,18 +469,22 @@ module ki_l2_cache #(
                                  (br_state == BR_HIT_STREAM) ? 1'b0 :
                                  sdram_done;
 
-      // Direct-fill outputs.
-      assign sdram_fast_req_tog  = sdram_fast_req_tog_r;
-      assign sdram_fast_req_line = fast_req_line_r;
+      // Direct-fill outputs. Without L2_FAST the FSM never leaves FAST_IDLE
+      // (fast_req_new is 0) and the port is a wire, as in g_bypass.
+      assign sdram_fast_req_tog  = L2_FAST ? sdram_fast_req_tog_r : cpu_fast_req_tog;
+      assign sdram_fast_req_line = L2_FAST ? fast_req_line_r      : cpu_fast_req_line;
 
-      assign cpu_fast_window   = fast_hit_win ||
+      assign cpu_fast_window   = !L2_FAST ? sdram_fast_window :
+                                 fast_hit_win ||
                                  ((fast_state == FAST_MISS_WAIT) && sdram_fast_window);
-      assign cpu_fast_beat     = fast_hit_win ||
+      assign cpu_fast_beat     = !L2_FAST ? sdram_fast_beat :
+                                 fast_hit_win ||
                                  ((fast_state == FAST_MISS_WAIT) && sdram_fast_beat);
-      assign cpu_fast_first    = (fast_hit_win && (fast_beat_cnt == 2'd0)) ||
+      assign cpu_fast_first    = !L2_FAST ? sdram_fast_first :
+                                 (fast_hit_win && (fast_beat_cnt == 2'd0)) ||
                                  ((fast_state == FAST_MISS_WAIT) && sdram_fast_first);
-      assign cpu_fast_qword    = fast_hit_win ? fast_hit_q : sdram_fast_qword;
-      assign cpu_fast_done_tog = fast_done_tog_r;
+      assign cpu_fast_qword    = (!L2_FAST || !fast_hit_win) ? sdram_fast_qword : fast_hit_q;
+      assign cpu_fast_done_tog = L2_FAST ? fast_done_tog_r : sdram_fast_done_tog;
 
       // ----------------------------------------------------------------------
       // Sequential control
@@ -561,6 +590,20 @@ module ki_l2_cache #(
           endcase
         end
 
+        // ---- Bridge request pending slot ----
+        // Set by a request that arrives outside BR_IDLE; cleared once BR_IDLE
+        // has taken it (every request seen in BR_IDLE is taken that cycle).
+        if (reset) begin
+          br_pend_rd <= 1'b0;
+          br_pend_wr <= 1'b0;
+        end else if (br_state == BR_IDLE) begin
+          br_pend_rd <= 1'b0;
+          br_pend_wr <= 1'b0;
+        end else begin
+          if (bridge_read)  br_pend_rd <= 1'b1;
+          if (bridge_write) br_pend_wr <= 1'b1;
+        end
+
         // ---- Bridge FSM ----
         if (reset) begin
           br_state       <= BR_IDLE;
@@ -569,7 +612,7 @@ module ki_l2_cache #(
         end else begin
           case (br_state)
             BR_IDLE: begin
-              if (bridge_read && br_in_eligible) begin
+              if (br_req_read && br_in_eligible) begin
                 br_req_addr <= bridge_address;
                 br_req_tag  <= br_in_tag;
                 if (br_rd_start_idle)
