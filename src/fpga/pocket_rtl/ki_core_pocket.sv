@@ -1295,6 +1295,26 @@ always @(posedge clk_core) begin
 		perf_flip <= ~perf_flip;
 end
 
+// V233: game frames per 2^28 clk_core cycles (5.37 s), on the Perf page's
+// last field (FP, replacing 3W: the slowest frame's S3, always 0000). The
+// one-frame census swings with the scene (V231 read lost cycles 0A51 and
+// 0CD7 a minute apart), so builds are compared on this instead. At 58.98 Hz
+// a window holds ~316 vblanks: every frame in one vblank reads ~013C, every
+// frame in two ~009E.
+reg        fps_flip_d = 1'b0;
+reg [27:0] fps_timer = 28'd0;
+reg [15:0] fps_count = 16'd0;
+reg [15:0] fps_latched = 16'd0;
+always @(posedge clk_core) begin
+	fps_flip_d <= perf_flip;
+	fps_timer <= fps_timer + 28'd1;
+	if (&fps_timer) begin
+		fps_latched <= fps_count + {15'd0, perf_flip != fps_flip_d};
+		fps_count <= 16'd0;
+	end else if (perf_flip != fps_flip_d)
+		fps_count <= fps_count + 16'd1;
+end
+
 // The data cache's direct fill path: from the CPU's clock to the SDRAM
 // controller's second port and back through ki_fast_fill, inside the adapter.
 wire        cpu_fast_ok;
@@ -2053,7 +2073,7 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// coherent capture rather than a live sample of a 736-bit bus.
 		.page(dbg_page),
 		.perf(debug_perf_bus_sync),
-		.perf_worst(debug_perf_worst_sync),
+		.perf_worst({debug_perf_worst_sync[223:160], fps_latched, debug_perf_worst_sync[143:0]}),
 		// V217: the PC profile does not fit beside the census (1853 of 1848
 		// LABs); left unread so its counters are pruned.
 		.perf_prof(336'd0),
