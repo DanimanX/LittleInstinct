@@ -4,7 +4,12 @@
 module ki_memory_bridge #(
   // A demand read of the framebuffer streams, a qword a cycle; see
   // FB_READ_ISSUE. 0 reads every qword in two cycles, as a read-ahead's.
-  parameter bit FB_STREAM = 1'b1
+  parameter bit FB_STREAM = 1'b1,
+  // Pocket SDRAM wires DQM, so a CPU line write-back with absent qwords or
+  // partial bytes goes out as one 16-word burst with its real byte enables
+  // instead of wb_split's per-qword bursts. 0 is bit-identical to the MiSTer
+  // split path.
+  parameter bit LINE_DQM = 1'b1
 ) (
   input  wire         clk,
   input  wire         ddr_clk,
@@ -573,6 +578,15 @@ module ki_memory_bridge #(
       cpu_pending ? pending_line_data : cpu_line_data;
   wire  [31:0] active_line_bytes =
       cpu_pending ? pending_line_bytes : cpu_line_bytes;
+  // Effective per-byte enables for a CPU line write-back: qword k is enabled
+  // only when active_write_mask[k] is set, and within it only the bytes
+  // marked in active_line_bytes[k*8 +: 8].
+  wire  [31:0] active_line_be = {
+    {8{active_write_mask[3]}} & active_line_bytes[31:24],
+    {8{active_write_mask[2]}} & active_line_bytes[23:16],
+    {8{active_write_mask[1]}} & active_line_bytes[15:8],
+    {8{active_write_mask[0]}} & active_line_bytes[7:0]
+  };
 
   wire io_selected =
       ((active_address >= KI_IO_BASE) &&
@@ -610,11 +624,11 @@ module ki_memory_bridge #(
   // so it must not sit here indefinitely: bit 5 flushes it after 32 cycles,
   // which is far longer than the gap between a writeback's beats.
   logic   [5:0] wb_idle = 6'd0;
-  // A line write with some qwords left out goes out as one full-enable 4-word
-  // burst per qword it holds, never as a 16-word burst with words masked off.
-  // The board ignores DQM, so masked words inside a write burst would be
-  // written anyway, while every simulation model honours it. ki_sdram_bist
-  // checks DQM on the board; this path does not depend on the answer.
+  // When LINE_DQM=0 (MiSTer, where the board ignores DQM), a line write with
+  // some qwords left out goes out as one full-enable 4-word burst per qword it
+  // holds, never as a 16-word burst with words masked off. When LINE_DQM=1
+  // (Pocket, where DQM is wired), wb_split stays clear and one 16-word burst
+  // carries wb_be onto DQM.
   logic         wb_split = 1'b0;
   logic   [3:0] wb_qmask = 4'd0;     // qwords still to write in split mode
 
@@ -1131,13 +1145,14 @@ module ki_memory_bridge #(
             dcs_rom_request_seen_level <= 1'b1;
             state <= DCS_ROM_READ_ISSUE;
           end else if (fb_line_req) begin
-            // Route framebuffer dirty-line writebacks through the same split-aware
-            // SDRAM writeback path as ordinary RAM lines so partial-qword masks
-            // (active_write_mask[3:0] != 4'b1111) never overwrite unstored qwords.
+            // Route framebuffer dirty-line writebacks through the SDRAM
+            // writeback path: with LINE_DQM=1, one 16-word burst carries the
+            // real byte enables (qword mask AND line_bytes); with LINE_DQM=0,
+            // partial-qword masks fall back to wb_split.
             wb_addr         <= active_word_address;
             wb_data         <= active_line_data;
-            wb_be           <= {32{1'b1}};
-            wb_split        <= (active_write_mask[3:0] != 4'b1111);
+            wb_be           <= LINE_DQM ? active_line_be : {32{1'b1}};
+            wb_split        <= !LINE_DQM && (active_write_mask[3:0] != 4'b1111);
             wb_qmask        <= active_write_mask[3:0];
             wb_count        <= 3'd4;
             wb_idle         <= 6'd0;
@@ -1154,11 +1169,13 @@ module ki_memory_bridge #(
             // flushes first.
             wb_addr <= active_word_address;
             wb_data <= active_line_data;
-            // Per qword: a data-cache line whose store-miss fill was skipped
-            // holds nothing for the qwords it never stored, and SDRAM does.
-            // A whole line is one burst; anything less is split, see wb_split.
-            wb_be <= {32{1'b1}};
-            wb_split <= (active_write_mask[3:0] != 4'b1111);
+            // Per qword/byte: a data-cache line whose store-miss fill was
+            // skipped holds nothing for unstored qwords (or bytes under
+            // FB_PARTIAL), and SDRAM does. With LINE_DQM=1 DQM masks them
+            // inside one 16-word burst; with LINE_DQM=0 anything less than a
+            // whole line is split, see wb_split.
+            wb_be <= LINE_DQM ? active_line_be : {32{1'b1}};
+            wb_split <= !LINE_DQM && (active_write_mask[3:0] != 4'b1111);
             wb_qmask <= active_write_mask[3:0];
             wb_count <= 3'd4;
             wb_idle <= 6'd0;
@@ -1475,8 +1492,9 @@ module ki_memory_bridge #(
         // wb_count * 4 words, and the line is 32-byte aligned so it cannot
         // cross a row.
         SDRAM_WB_FLUSH_ISSUE: begin
-          if (wb_split && wb_qmask == 4'd0) begin
-            // A line with no qword to write: nothing goes out.
+          if ((wb_split && (wb_qmask == 4'd0)) ||
+              (LINE_DQM && (wb_be == 32'd0))) begin
+            // A line with no byte to write: nothing goes out.
             wb_count <= 3'd0;
             wb_idle <= 6'd0;
             wb_split <= 1'b0;

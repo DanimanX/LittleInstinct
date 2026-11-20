@@ -1463,7 +1463,7 @@ end else begin : g_no_trace_shadow
 	end
 end endgenerate
 
-ki_memory_bridge memory_bridge
+ki_memory_bridge #(.LINE_DQM(1'b1)) memory_bridge
 (
 	.clk(clk_core),
 	.ddr_clk(clk_ddr),
