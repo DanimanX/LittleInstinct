@@ -1309,6 +1309,7 @@ wire        controller_fast_tog;
 wire [24:0] controller_fast_addr;
 wire        controller_fast_valid;
 
+wire perf_clear_hold;  // V220, driven by the debug page chord below
 ki_cpu_core #(
 	.DEBUG_TRACE(DEBUG_TRACE),
 	.PERF_CENSUS(1),
@@ -1373,7 +1374,7 @@ ki_cpu_core #(
 	.debug_fetch_pc(debug_cpu_pc),
 	.debug_retired(debug_cpu_retired),
 	.perf_flip(perf_flip),
-	.perf_clear(status[7]),
+	.perf_clear(status[7] | perf_clear_hold),
 	.prof_fine_sel(status[12:9]),
 	.perf_bridge_out(bridge_perf_out),
 	.perf_bridge_burst(bridge_perf_burst),
@@ -1849,11 +1850,25 @@ ki_input_chord #(.WINDOW_CYCLES(12_500_000), .WINDOW_BITS(24)) page_chord (
 	.both_held()
 );
 reg [1:0] dbg_page = 2'd0;
+// V220: leaving the census page (Select + R back to page 0) clears its
+// SLOWEST block, so it can hold the worst frame of a fight instead of the
+// boot load's. Held ~84 ms: the census only samples it on a frame tick,
+// which is 33 ms apart at 30 fps.
+reg [21:0] perf_clear_cnt = 22'd0;
+assign perf_clear_hold = (perf_clear_cnt != 22'd0);
 always @(posedge clk_core) begin
-	if (shell_reset)
+	if (shell_reset) begin
 		dbg_page <= 2'd0;
-	else if (page_chord_pulse)
-		dbg_page <= (dbg_page == 2'd0) ? 2'd2 : 2'd0;
+		perf_clear_cnt <= 22'd0;
+	end else begin
+		if (perf_clear_cnt != 22'd0)
+			perf_clear_cnt <= perf_clear_cnt - 22'd1;
+		if (page_chord_pulse) begin
+			dbg_page <= (dbg_page == 2'd0) ? 2'd2 : 2'd0;
+			if (dbg_page == 2'd2)
+				perf_clear_cnt <= 22'h3FFFFF;
+		end
+	end
 end
 
 // Repurposed status-page fields, all of which were wired to constants before.

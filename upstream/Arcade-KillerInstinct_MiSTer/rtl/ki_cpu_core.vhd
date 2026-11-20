@@ -530,7 +530,8 @@ begin
    function perf_slice(v : unsigned(23 downto 0); idx : integer)
       return std_logic_vector is
    begin
-      if (idx = 2 or idx = 12) then
+      -- V220: field 5 (UF) counts direct fills on the Pocket, a count too.
+      if (idx = 2 or idx = 5 or idx = 12) then
          if (v(23 downto 16) /= 0) then
             return x"FFFF";
          end if;

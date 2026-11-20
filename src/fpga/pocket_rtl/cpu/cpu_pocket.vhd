@@ -2205,7 +2205,7 @@ begin
                         perf_lost_md &                    -- 6 MD
                         (stall4 and writeback_UseCache) & -- 5 DC
                         (perf_uc_ram or perf_uc_io or perf_uc_rom) & -- 4 UO
-                        perf_uc_fb &                      -- 3 UF
+                        fast_go &                         -- 3 UF (V220: direct fills, a COUNT)
                         stall4 &                          -- 2 S4
                         perf_uc_write &                   -- 1 UW
                         datacache_perf_miss;              -- 0 MC

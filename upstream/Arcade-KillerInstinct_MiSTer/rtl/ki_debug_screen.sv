@@ -611,7 +611,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="2"; 11: screen_char="1"; 12: screen_char="9";
+          10: screen_char="2"; 11: screen_char="2"; 12: screen_char="0";
           default: screen_char=" ";
         endcase
         1: case (column)
