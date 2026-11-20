@@ -54,6 +54,7 @@ set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) r
 # ki_memory_bridge: upstream's, with the framebuffer made switchable so the port
 # can move it off chip (see pocket_rtl/ki_memory_bridge_pocket.sv)
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_memory_bridge_pocket.sv ]
+set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) pocket_rtl/ki_l2_cache.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_adapter.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_bist.sv ]
 set_global_assignment -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) rtl/ki_sdram_burst.sv ]

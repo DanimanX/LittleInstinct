@@ -1645,6 +1645,73 @@ always @(posedge clk_core or negedge pll_locked) begin
 end
 wire sdram_init_reset = ~sdram_postlock_pipe[7];
 
+// V234: 64 KiB M10K L2 cache for main RAM, spliced between {memory_bridge,
+// cpu direct-fill} and sdram_adapter. Set L2_ENABLE=0 for a pure wire-through
+// bisect fallback.
+wire  [24:0] l2_sdram_address;
+wire [255:0] l2_sdram_write_data;
+wire  [31:0] l2_sdram_byte_enable;
+wire   [4:0] l2_sdram_burst;
+wire         l2_sdram_read;
+wire         l2_sdram_write;
+wire  [31:0] l2_sdram_read_data;
+wire   [1:0] l2_sdram_read_be;
+wire         l2_sdram_data_valid;
+wire         l2_sdram_done;
+wire         l2_fast_req_tog;
+wire  [31:0] l2_fast_req_line;
+wire         l2_fast_window;
+wire         l2_fast_beat;
+wire         l2_fast_first;
+wire  [63:0] l2_fast_qword;
+wire         l2_fast_done_tog;
+wire  [15:0] l2_perf_hits;
+wire  [15:0] l2_perf_misses;
+
+ki_l2_cache #(.L2_ENABLE(1'b1)) l2_cache
+(
+	.clk(clk_core),
+	.reset(sdram_init_reset),
+	.cpu_reset(cpu_reset),
+	.bridge_address(bridge_sdram_address),
+	.bridge_write_data(bridge_sdram_write_data),
+	.bridge_byte_enable(bridge_sdram_byte_enable),
+	.bridge_burst(bridge_sdram_burst),
+	.bridge_read(bridge_sdram_read),
+	.bridge_write(bridge_sdram_write),
+	.bridge_read_data(bridge_sdram_read_data),
+	.bridge_read_be(bridge_sdram_read_be),
+	.bridge_data_valid(bridge_sdram_data_valid),
+	.bridge_done(bridge_sdram_done),
+	.sdram_address(l2_sdram_address),
+	.sdram_write_data(l2_sdram_write_data),
+	.sdram_byte_enable(l2_sdram_byte_enable),
+	.sdram_burst(l2_sdram_burst),
+	.sdram_read(l2_sdram_read),
+	.sdram_write(l2_sdram_write),
+	.sdram_read_data(l2_sdram_read_data),
+	.sdram_read_be(l2_sdram_read_be),
+	.sdram_data_valid(l2_sdram_data_valid),
+	.sdram_done(l2_sdram_done),
+	.cpu_fast_req_tog(cpu_fast_req_tog),
+	.cpu_fast_req_line(cpu_fast_req_line),
+	.cpu_fast_window(cpu_fast_window),
+	.cpu_fast_beat(cpu_fast_beat),
+	.cpu_fast_first(cpu_fast_first),
+	.cpu_fast_qword(cpu_fast_qword),
+	.cpu_fast_done_tog(cpu_fast_done_tog),
+	.sdram_fast_req_tog(l2_fast_req_tog),
+	.sdram_fast_req_line(l2_fast_req_line),
+	.sdram_fast_window(l2_fast_window),
+	.sdram_fast_beat(l2_fast_beat),
+	.sdram_fast_first(l2_fast_first),
+	.sdram_fast_qword(l2_fast_qword),
+	.sdram_fast_done_tog(l2_fast_done_tog),
+	.perf_flip(perf_flip),
+	.perf_l2_hits(l2_perf_hits),
+	.perf_l2_misses(l2_perf_misses)
+);
+
 // ki_sdram_x2 lives inside the adapter and packs the controller's 16-bit beats
 // into the 32 bits clk_core expects. clk_sdram_ctl runs at twice clk_core, so
 // a 32-bit beat comes out every clk_core cycle.
@@ -1653,16 +1720,16 @@ ki_sdram_adapter sdram_adapter
 	.clk(clk_core),
 	.clk2x(clk_sdram_ctl),
 	.reset(sdram_init_reset),
-	.request_address(bridge_sdram_address),
-	.request_write_data(bridge_sdram_write_data),
-	.request_byte_enable(bridge_sdram_byte_enable),
-	.request_burst(bridge_sdram_burst),
-	.request_read(bridge_sdram_read),
-	.request_write(bridge_sdram_write),
-	.request_read_data(bridge_sdram_read_data),
-	.request_read_be(bridge_sdram_read_be),
-	.request_data_valid(bridge_sdram_data_valid),
-	.request_done(bridge_sdram_done),
+	.request_address(l2_sdram_address),
+	.request_write_data(l2_sdram_write_data),
+	.request_byte_enable(l2_sdram_byte_enable),
+	.request_burst(l2_sdram_burst),
+	.request_read(l2_sdram_read),
+	.request_write(l2_sdram_write),
+	.request_read_data(l2_sdram_read_data),
+	.request_read_be(l2_sdram_read_be),
+	.request_data_valid(l2_sdram_data_valid),
+	.request_done(l2_sdram_done),
 	.aux_address(bist_sdram_address),
 	.aux_write_data(bist_sdram_write_data),
 	.aux_byte_enable(bist_sdram_byte_enable),
@@ -1674,13 +1741,13 @@ ki_sdram_adapter sdram_adapter
 	.aux_data_valid(bist_sdram_data_valid),
 	.aux_done(bist_sdram_done),
 	.sdram_ready(sdram_ready),
-	.fast_req_tog(cpu_fast_req_tog),
-	.fast_req_line(cpu_fast_req_line),
-	.fast_window(cpu_fast_window),
-	.fast_beat(cpu_fast_beat),
-	.fast_first(cpu_fast_first),
-	.fast_qword(cpu_fast_qword),
-	.fast_done_tog(cpu_fast_done_tog),
+	.fast_req_tog(l2_fast_req_tog),
+	.fast_req_line(l2_fast_req_line),
+	.fast_window(l2_fast_window),
+	.fast_beat(l2_fast_beat),
+	.fast_first(l2_fast_first),
+	.fast_qword(l2_fast_qword),
+	.fast_done_tog(l2_fast_done_tog),
 	.controller_address(controller_sdram_address),
 	.controller_write_data(controller_sdram_write_data),
 	.controller_byte_enable(controller_sdram_byte_enable),
@@ -2071,9 +2138,13 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// Page 1 is the frozen pre-event trace. It is fed from the clk_core
 		// shadow, not from the CPU domain directly, so what is on screen is a
 		// coherent capture rather than a live sample of a 736-bit bus.
+		// V234: splice per-frame L2 line-fill hits (LH) into live field 9
+		// (replacing 3L on row 14 left) and misses (LX) into the slowest
+		// block's field 3 (replacing unused worst UW), keeping DI, live UW,
+		// and FP untouched.
 		.page(dbg_page),
-		.perf(debug_perf_bus_sync),
-		.perf_worst({debug_perf_worst_sync[223:160], fps_latched, debug_perf_worst_sync[143:0]}),
+		.perf({debug_perf_bus_sync[223:160], l2_perf_hits, debug_perf_bus_sync[143:0]}),
+		.perf_worst({debug_perf_worst_sync[223:160], fps_latched, debug_perf_worst_sync[143:64], l2_perf_misses, debug_perf_worst_sync[47:0]}),
 		// V217: the PC profile does not fit beside the census (1853 of 1848
 		// LABs); left unread so its counters are pruned.
 		.perf_prof(336'd0),
