@@ -1325,8 +1325,13 @@ ki_cpu_core #(
 	// The synchronisers only added latency to every miss (V217 census: ~43
 	// CPU cycles per D-cache miss, ~45% of each game frame).
 	.SYNC_CROSSING(1),
-	.DCACHE_SKIP_FILL(0),
-	.DCACHE_FB_PARTIAL(0),
+	// V225: a store miss allocates its line without the SDRAM read; a
+	// partial store to a framebuffer line does too, its bytes tracked by
+	// the tag (V224 census: framebuffer misses are ~half the D-cache stall,
+	// and the low RAM outside them misses zero times). Upstream's default;
+	// off on the Pocket since 902cbb3, no reason recorded.
+	.DCACHE_SKIP_FILL(1),
+	.DCACHE_FB_PARTIAL(1),
 	.DCACHE_WB_EARLY(0),
 	.DCACHE_STORE_BUFFER(0),
 	.DCACHE_SB_FORWARD(0),
