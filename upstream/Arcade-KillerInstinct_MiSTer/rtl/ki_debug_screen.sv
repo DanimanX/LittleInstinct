@@ -409,12 +409,9 @@ module ki_debug_screen #(
                                        : perf_field(column, 5'd8, "D", "C", f[7]);
         // UW is a store the full write FIFO will not take yet. UF is an
         // uncached load from the framebuffer pages. UO (row 6) is the rest:
-        // S4 = DC + UW + UF + UO. In the SLOWEST block UW is always 0000, so
-        // V234 reuses that slot (row 10 left) for LX: per-frame L2 cache
-        // line-fill misses (paired with LH on row 14 left).
+        // S4 = DC + UW + UF + UO.
         3: perf_char = (column < 5'd8)
-                       ? ((row >= 4'd8) ? perf_field(column, 5'd0, "L", "X", f[3])
-                                        : perf_field(column, 5'd0, "U", "W", f[3]))
+                       ? perf_field(column, 5'd0, "U", "W", f[3])
                        : perf_field(column, 5'd8, "U", "F", f[5]);
         // Stage 3 frozen on a multiply or divide (MD).
         //
@@ -495,12 +492,12 @@ module ki_debug_screen #(
       // the slowest frame.
       // It is the one row reading p and w at once, hence the direct indexing
       // instead of f[].
-      // V233/V234: 3L and 3W both read ~0000 on the Pocket, so row 14 carries
-      // LH (per-frame L2 line-fill hits, paired with LX on row 10 left) beside
+      // V233/V236: 3L and 3W both read ~0000 on the Pocket, so row 14 carries
+      // ID (the live frame's idle cycles, see ki_cpu_core's field 9) beside
       // FP (game frames per 5.37 s window).
       if (row == 4'd14) begin
         perf_char = (column < 5'd8)
-                  ? perf_field(column, 5'd0, "L", "H", p[9*16 +: 16])
+                  ? perf_field(column, 5'd0, "I", "D", p[9*16 +: 16])
                   : perf_field(column, 5'd8, "F", "P", w[9*16 +: 16]);
       end
     end
@@ -618,7 +615,7 @@ module ki_debug_screen #(
           0: screen_char="K"; 1: screen_char="I"; 3: screen_char="D";
           4: screen_char="E"; 5: screen_char="B"; 6: screen_char="U";
           7: screen_char="G"; 9: screen_char="V";
-          10: screen_char="2"; 11: screen_char="3"; 12: screen_char="5";
+          10: screen_char="2"; 11: screen_char="3"; 12: screen_char="6";
           default: screen_char=" ";
         endcase
         1: case (column)

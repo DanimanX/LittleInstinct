@@ -275,6 +275,7 @@ architecture rtl of ki_cpu_core is
    type t_fine is array(0 to FINE_N - 1) of unsigned(23 downto 0);
    type t_perf is array(0 to PERF_N - 1) of unsigned(23 downto 0);
    signal perf_cnt       : t_perf := (others => (others => '0'));
+   signal idle_run       : unsigned(8 downto 0) := (others => '0');
    signal perf_events    : std_logic_vector(11 downto 0);
    signal perf_mem       : std_logic_vector(MEM_N - 1 downto 0);
    signal debug_retired_i : std_logic_vector(31 downto 0);
@@ -709,6 +710,28 @@ begin
                for b in 0 to 11 loop
                   perf_cnt(b + 2) <= bump(perf_cnt(b + 2), perf_events(b));
                end loop;
+               -- V236: field 9 (S3, a stage-3 freeze outside multiply and
+               -- divide, ~000D a frame on the Pocket) counts IDLE cycles
+               -- instead: cycles inside a run of more than 256 with no lost
+               -- cycle at all (S4, MD, S3, S1, LB). A frame's real work misses
+               -- the D-cache every ~68 cycles on average, so it almost never
+               -- runs that long clean; a wait loop spinning on cached memory
+               -- does nothing else (UO, the uncached-load stall, is ~00B8, so
+               -- it is not polling I/O). CY - ID is then the frame's busy time,
+               -- to compare against one vblank (0CEF). A run's first 256
+               -- cycles are not counted, a small undercount.
+               if (perf_events(2) = '1' or perf_events(6) = '1' or perf_events(7) = '1' or
+                   perf_events(8) = '1' or perf_events(9) = '1') then
+                  idle_run <= (others => '0');
+               else
+                  if (idle_run(8) = '0') then
+                     idle_run <= idle_run + 1;
+                  end if;
+               end if;
+               perf_cnt(9) <= bump(perf_cnt(9),
+                                   idle_run(8) and not (perf_events(2) or perf_events(6) or
+                                                        perf_events(7) or perf_events(8) or
+                                                        perf_events(9)));
                -- Retired is a free-running total in cpu.vhd, so difference it
                -- against the value at the start of this window.
                retired_cnt <= resize(unsigned(debug_retired_i) - retired_prev, 24);

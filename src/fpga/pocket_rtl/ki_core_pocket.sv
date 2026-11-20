@@ -1668,7 +1668,10 @@ wire         l2_fast_done_tog;
 wire  [15:0] l2_perf_hits;
 wire  [15:0] l2_perf_misses;
 
-ki_l2_cache #(.L2_ENABLE(1'b1)) l2_cache
+// V236: off. V235 measured a ~20% hit rate on bridge fills (LH 073A,
+// LX 1C13 a frame): a fight sweeps far more than 64 KiB, and FP stayed
+// 009E. Kept as a pass-through for a later revision.
+ki_l2_cache #(.L2_ENABLE(1'b0)) l2_cache
 (
 	.clk(clk_core),
 	.reset(sdram_init_reset),
@@ -2143,8 +2146,8 @@ generate if (DEBUG_BUILD) begin : g_overlays
 		// block's field 3 (replacing unused worst UW), keeping DI, live UW,
 		// and FP untouched.
 		.page(dbg_page),
-		.perf({debug_perf_bus_sync[223:160], l2_perf_hits, debug_perf_bus_sync[143:0]}),
-		.perf_worst({debug_perf_worst_sync[223:160], fps_latched, debug_perf_worst_sync[143:64], l2_perf_misses, debug_perf_worst_sync[47:0]}),
+		.perf(debug_perf_bus_sync),
+		.perf_worst({debug_perf_worst_sync[223:160], fps_latched, debug_perf_worst_sync[143:0]}),
 		// V217: the PC profile does not fit beside the census (1853 of 1848
 		// LABs); left unread so its counters are pruned.
 		.perf_prof(336'd0),
