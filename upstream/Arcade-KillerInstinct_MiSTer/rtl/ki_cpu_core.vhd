@@ -531,7 +531,8 @@ begin
       return std_logic_vector is
    begin
       -- V220: field 5 (UF) counts direct fills on the Pocket, a count too.
-      if (idx = 2 or idx = 5 or idx = 12) then
+      -- V224: field 13 (DI) counts low non-framebuffer misses.
+      if (idx = 2 or idx = 5 or idx = 12 or idx = 13) then
          if (v(23 downto 16) /= 0) then
             return x"FFFF";
          end if;

@@ -2199,24 +2199,24 @@ begin
                      (perf_dc and perf_st4_region(0) and not perf_st4_region(1)) & -- 1 DF
                      datacache_perf_miss_fb;                          -- 0 FM
 
-   -- V221: three fields that read ~0 in a fight are lent to the miss
-   -- breakdown: UW = cycles writing back a dirty victim, UO = cycles in FILL
-   -- before its first beat. UF counts direct fills (V220).
-   -- V222: DI = cycles in FILL before the first beat while a direct fill is
-   -- out (fast_busy, not a read-ahead or uncached one): UO - DI is the
-   -- bridge path's share of the first-beat wait.
-   debug_perf_events <= (datacache_perf_fill_wait and fast_busy and
-                         not fast_is_ra_r and not fast_is_unc_r) & -- 11 DI (V222)
+   -- V224: where the misses go, to size an SRAM for the low region.
+   -- UW = stall cycles on low RAM outside the framebuffers (DS), UO = stall
+   -- cycles on the framebuffers (DF), DI = misses on low RAM outside the
+   -- framebuffers (SM, a count). LM - DI = framebuffer misses; DC - UW - UO
+   -- = main RAM (and I/O) stall. UF counts direct fills (V220).
+   debug_perf_events <= (datacache_perf_miss_low and
+                         not datacache_perf_miss_fb) &    -- 11 DI = SM (V224)
                         datacache_perf_miss_low &         -- 10 LM
                         perf_lost_lb &                    -- 9 LB
                         perf_lost_s1 &                    -- 8 S1
                         perf_lost_s3 &                    -- 7 S3
                         perf_lost_md &                    -- 6 MD
                         (stall4 and writeback_UseCache) & -- 5 DC
-                        datacache_perf_fill_wait &        -- 4 UO (V221)
+                        (perf_dc and perf_st4_region(0) and
+                         not perf_st4_region(1)) &        -- 4 UO = DF (V224)
                         fast_go &                         -- 3 UF (V220: direct fills, a COUNT)
                         stall4 &                          -- 2 S4
-                        datacache_perf_writeback &        -- 1 UW (V221)
+                        (perf_dc and perf_st4_sram) &     -- 1 UW = DS (V224)
                         datacache_perf_miss;              -- 0 MC
    read_meta_push <= writefifo_wr_accept and writefifo_Din(105);
    -- Every store entering the write FIFO, write-backs included: the data
