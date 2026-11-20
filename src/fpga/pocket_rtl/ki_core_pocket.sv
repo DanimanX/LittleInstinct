@@ -1330,10 +1330,11 @@ ki_cpu_core #(
 	// the tag (V224 census: framebuffer misses are ~half the D-cache stall,
 	// and the low RAM outside them misses zero times). Upstream's default;
 	// off on the Pocket since 902cbb3, no reason recorded.
-	// V226: FB_PARTIAL back off to bisect V225's background corruption
-	// (blocks of garbage in the gym stage): SKIP_FILL alone.
+	// V226 bisected V225's corruption to FB_PARTIAL: the bridge wrote its
+	// partial qwords whole. V227's LINE_DQM writes a line with its real
+	// byte enables on DQM, so V228 turns FB_PARTIAL back on.
 	.DCACHE_SKIP_FILL(1),
-	.DCACHE_FB_PARTIAL(0),
+	.DCACHE_FB_PARTIAL(1),
 	.DCACHE_WB_EARLY(0),
 	.DCACHE_STORE_BUFFER(0),
 	.DCACHE_SB_FORWARD(0),
