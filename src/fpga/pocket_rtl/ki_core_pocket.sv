@@ -1335,9 +1335,15 @@ ki_cpu_core #(
 	// byte enables on DQM, so V228 turns FB_PARTIAL back on.
 	.DCACHE_SKIP_FILL(1),
 	.DCACHE_FB_PARTIAL(1),
-	.DCACHE_WB_EARLY(0),
-	.DCACHE_STORE_BUFFER(0),
-	.DCACHE_SB_FORWARD(0),
+	// V229: V228's census still loses CY-RT=0CDF, DC=09C6 of it with the
+	// framebuffer only 010B, so the rest is main RAM. Upstream's defaults,
+	// off on the Pocket since 902cbb3 with no reason recorded: a dirty miss
+	// fills without waiting for its write-back, and a store that hits parks
+	// in a buffer (a later load reads it) instead of writing the RAM that
+	// cycle, which also takes the tag RAM off the cache write-enable path.
+	.DCACHE_WB_EARLY(1),
+	.DCACHE_STORE_BUFFER(1),
+	.DCACHE_SB_FORWARD(1),
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
 	.DCACHE_FILL_AT_MISS(0),
