@@ -1575,6 +1575,8 @@ architecture arch of cpu is
    signal datacache_perf_miss_low      : std_logic;
    signal datacache_perf_miss_fb       : std_logic;
    signal datacache_perf_fill_wait     : std_logic;
+   signal datacache_perf_fill_hold     : std_logic;  -- V221
+   signal datacache_perf_writeback     : std_logic;  -- V221
    signal datacache_perf_stride_hit    : std_logic;
    signal datacache_perf_wb_line       : std_logic;
    signal datacache_perf_fill_store    : std_logic;
@@ -2197,17 +2199,21 @@ begin
                      (perf_dc and perf_st4_region(0) and not perf_st4_region(1)) & -- 1 DF
                      datacache_perf_miss_fb;                          -- 0 FM
 
-   debug_perf_events <= perf_ld_indep &                   -- 11 DI
+   -- V221: three fields that read ~0 in a fight are lent to the miss
+   -- breakdown: UW = cycles writing back a dirty victim, UO = cycles in FILL
+   -- before its first beat, DI = cycles in FILL with every beat in, waiting
+   -- for ram_done. UF counts direct fills (V220).
+   debug_perf_events <= datacache_perf_fill_hold &        -- 11 DI (V221)
                         datacache_perf_miss_low &         -- 10 LM
                         perf_lost_lb &                    -- 9 LB
                         perf_lost_s1 &                    -- 8 S1
                         perf_lost_s3 &                    -- 7 S3
                         perf_lost_md &                    -- 6 MD
                         (stall4 and writeback_UseCache) & -- 5 DC
-                        (perf_uc_ram or perf_uc_io or perf_uc_rom) & -- 4 UO
+                        datacache_perf_fill_wait &        -- 4 UO (V221)
                         fast_go &                         -- 3 UF (V220: direct fills, a COUNT)
                         stall4 &                          -- 2 S4
-                        perf_uc_write &                   -- 1 UW
+                        datacache_perf_writeback &        -- 1 UW (V221)
                         datacache_perf_miss;              -- 0 MC
    read_meta_push <= writefifo_wr_accept and writefifo_Din(105);
    -- Every store entering the write FIFO, write-backs included: the data
@@ -5491,8 +5497,8 @@ begin
       perf_miss_fb      => datacache_perf_miss_fb,
       perf_fill_wait    => datacache_perf_fill_wait,
       perf_fill_data    => open,
-      perf_fill_hold    => open,
-      perf_writeback    => open,
+      perf_fill_hold    => datacache_perf_fill_hold,
+      perf_writeback    => datacache_perf_writeback,
       perf_stride_hit   => datacache_perf_stride_hit,
       perf_way_slow     => open,
       perf_wb_line      => datacache_perf_wb_line,
