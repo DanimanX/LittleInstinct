@@ -1372,8 +1372,12 @@ ki_cpu_core #(
 	.DCACHE_CWF_FB(0),
 	.DCACHE_FILL_FIRST(0),
 	.DCACHE_FILL_AT_MISS(0),
-	.DCACHE_READ_AHEAD(0),
-	.DCACHE_RA_ANSWER(0),
+	// V237: upstream's defaults. V236 measured fights busy the whole two
+	// vblanks (ID ~0040-006E) with some frames at three (FP 0079); a clean
+	// miss to the line after the previous one also fetches the next line
+	// into a buffer, and a later miss there is answered from it.
+	.DCACHE_READ_AHEAD(1),
+	.DCACHE_RA_ANSWER(1),
 	// V223: a load miss answers as soon as its own qword is in (V222: a miss
 	// still pays ~10 cycles of line + ~3 of done after its first beat).
 	// Upstream's default; off on the Pocket since bring-up (ae1efd0).
