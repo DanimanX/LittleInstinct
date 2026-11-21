@@ -10,7 +10,33 @@ Analogue Pocket port of the Killer Instinct arcade core
 Covers **Killer Instinct (1994)** and **Killer Instinct 2 (1996)** — Midway KI
 hardware: R4600 MIPS III, DCS audio, ATA hard disk.
 
-## Estado: v1.1.0 — rediseño de relojes y del DSP (2026-11-16)
+## Estado: v1.2.0 — jugable a 30 fps (2026-11-21)
+
+**Killer Instinct arranca y se juega en el Analogue Pocket**, estable (sin
+cuelgues ni corrupción gráfica en las peleas), **a 30 fps: la mitad de la
+velocidad del arcade**. Las peleas y la demo dibujan un cuadro cada dos
+vblanks.
+
+Es el techo de este diseño en el Pocket, medido, no supuesto: la CPU está
+ocupada todo el cuadro, y solo las instrucciones de un cuadro de pelea ya no
+caben en un vblank a 50 MHz (el R4600 del arcade va a 100 MHz). La FPGA del
+Pocket no permite subir el reloj de la CPU. Todo el trabajo de velocidad, lo
+que se probó, lo que sirvió y por qué no se puede llegar a 60 fps está en
+[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+
+| | |
+|---|---|
+| Release | `Release/LittleInstinct_Pocket_v1.2.0.zip` (bitstream de la build de depuración V237) |
+| Velocidad | ~29,5 fps en peleas y demo (arcade: ~59 fps) |
+| Probado en consola | Killer Instinct: arranque, demo, peleas completas |
+| Sin probar en esta versión | Killer Instinct 2 |
+| Recursos | 18.060 / 18.480 ALMs (98 %), timing cerrado en las cuatro esquinas |
+
+La página Perf de la superposición de depuración (Start+Select) muestra `FP`,
+cuadros del juego cada 5,37 s (`009E` = 30 fps, `013C` = 60 fps), e `ID`, el
+tiempo ocioso de la CPU por cuadro.
+
+## Historia: v1.1.0 — rediseño de relojes y del DSP (2026-11-16)
 
 **Compila, cabe y cierra timing en las cuatro esquinas. Falta probarlo en la
 consola**: nadie ha cargado todavía este bitstream en un Pocket.

@@ -9,6 +9,23 @@ Rule for reading: **established** means a command was run and its output is
 quoted somewhere in `docs/`. **Hypothesis** means it fits the evidence and has
 not been tested. **Retracted** means it was written down here as fact and is not.
 
+## 00. Update 2026-11-21: v1.2.0 plays at 30 fps
+
+- **Established (on hardware, V237):** Killer Instinct boots, runs the attract
+  demo and plays full fights on a Pocket with no hang and no graphics
+  corruption. KI2 was not tried on this build.
+- **Established:** fights and the demo draw a frame every two vblanks (Perf
+  page `FP` ~009E); the CPU is busy the whole frame (`ID` under 2 %), and a
+  fight frame's instructions alone exceed one vblank at 50 MHz. 30 fps is the
+  ceiling of this design on the 5CEBA4.
+- **Established:** the CPU clock cannot be raised on this device (separate
+  69-75 MHz clock fails ~1,400-2,000 endpoints; a synchronous 56.25/112.5 MHz
+  domain has a negative SDRAM capture eye).
+
+[`PERFORMANCE.md`](PERFORMANCE.md) has the measurements, every build of the
+speed work (V224-V237), the two bugs found on the way, and what could still
+move the ceiling.
+
 ## 0. Update 2026-11-16: v1.1.0 supersedes sections 1 and the ADSP timing notes
 
 Everything below was written against v1.0.29. v1.1.0 merges that tree with a
